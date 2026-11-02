@@ -25,7 +25,7 @@ begin
         'select ST_AsMVT(f, ''cells'', 4096, ''geom'') from (
             select gridtiles.qk_to_text(z, qk) as qk, z, n%s,
                 ST_AsMVTGeom(gridtiles._envelope(z, qk), ST_TileEnvelope(%s, %s, %s), 4096, 0) as geom
-            from gridtiles.%I where z = %s and qk >= %s and qk < %s
+            from gridtiles.%I where z = %s and qk >= %s and qk < %s order by qk
         ) f',
         (select coalesce(string_agg(format(', %s as %I', p.expr, p.value), '' order by p.i), '')
          from gridtiles._properties(l.spec) with ordinality p(value, agg, expr, i) where p.agg <> 'count'),
