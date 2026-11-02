@@ -37,7 +37,7 @@ spec.model_dump_json()  # JSON accepted by gridtiles.create_layer
 
 ## `gridtiles.ingest`
 
-`load_points(conn, layer, path, *, lon=None, lat=None, crs="EPSG:4326")` loads a point file into an existing layer and returns a `LoadReport` (`records_read`, `records_loaded`, `skipped_null_geometry`, `cells_written`). It reads GeoParquet with pyarrow and everything else through GDAL (CSV, GeoJSON, Shapefile, GeoPackage…). For CSV, `lon` / `lat` name the coordinate columns (default: common names such as `lon`, `lat`). `crs` applies when the source declares none. Non-point geometry raises `UnsupportedGeometry`.
+`load_points(conn, layer, path, *, lon=None, lat=None, crs="EPSG:4326", rollup=True)` loads a point file into an existing layer, rebuilds the coarser levels and stats unless `rollup=False`, and returns a `LoadReport` (`records_read`, `records_loaded`, `skipped_null_geometry`, `cells_written`). It reads GeoParquet with pyarrow and everything else through GDAL (CSV, GeoJSON, Shapefile, GeoPackage…). For CSV, `lon` / `lat` name the coordinate columns (default: common names such as `lon`, `lat`). `crs` applies when the source declares none. Non-point geometry raises `UnsupportedGeometry`.
 
 ```python
 import psycopg

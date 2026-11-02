@@ -45,7 +45,7 @@ def test_points_small(db: psycopg.Connection) -> None:
     expected = json.loads((FIXTURES / "points_small.expected.json").read_text())
     rows = db.execute(
         "select gridtiles.qk_to_text(z, qk), n, population_sum, completeness_sum, completeness_w,"
-        " completeness_sum / completeness_w from gridtiles.cells_pop"
+        " completeness_sum / completeness_w from gridtiles.cells_pop where z = 16"
     ).fetchall()
     assert {r[0] for r in rows} == set(expected)
     for text, n, pop, c_sum, c_w, mean in rows:
@@ -66,7 +66,7 @@ def test_points_10k_totals_and_cells(db: psycopg.Connection) -> None:
     assert report.records_loaded == len(loaded)
     assert report.skipped_null_geometry == 10_000 - len(loaded)
 
-    n, pop = db.execute("select sum(n), sum(population_sum) from gridtiles.cells_pop").fetchone()
+    n, pop = db.execute("select sum(n), sum(population_sum) from gridtiles.cells_pop where z = 16").fetchone()
     assert n == len(loaded)
     pops = table["pop"].to_pylist()
     assert pop == pytest.approx(math.fsum(pops[i] for i in loaded), rel=1e-9)
@@ -75,7 +75,7 @@ def test_points_10k_totals_and_cells(db: psycopg.Connection) -> None:
     for i in loaded:
         qk = quadkey.from_lonlat(*points[i], 16)
         oracle[qk] = oracle.get(qk, 0) + 1
-    assert {qk: v[0] for (z, qk), v in cells(db, "pop").items()} == oracle
+    assert {qk: v[0] for (z, qk), v in cells(db, "pop").items() if z == 16} == oracle
 
 
 def test_loading_twice_adds_up(db: psycopg.Connection) -> None:
