@@ -1,6 +1,6 @@
 [project]
 name = "gridtiles"
-version = "0.0.0"
+version = "0.1.0"
 description = "Turn point, polygon and raster data into a quadkey grid served as zoomable vector tiles"
 readme = "README.md"
 license = "MIT"
