@@ -74,9 +74,9 @@ language sql immutable strict parallel safe as $$
 $$;
 
 -- The tile property of each value as an SQL expression over a cell row.
-create or replace function gridtiles._properties(spec jsonb) returns table (value text, expr text)
+create or replace function gridtiles._properties(spec jsonb) returns table (value text, agg text, expr text)
 language sql immutable strict parallel safe as $$
-    select v->>'name', case v->>'agg'
+    select v->>'name', v->>'agg', case v->>'agg'
         when 'count' then 'n'
         when 'mean' then format('%I / nullif(%I, 0)', v->>'name' || '_sum', v->>'name' || '_w')
         else quote_ident(v->>'name' || '_' || (v->>'agg'))
@@ -132,6 +132,12 @@ begin
         (select coalesce(string_agg(format(', %I double precision', col), '' order by i), '')
          from gridtiles._columns(spec) with ordinality c(value, agg, col, merge, part, src, weight, i))
     );
+    -- Tile server entry point (Martin function source); gridtiles.mvt is defined in 040_mvt.sql.
+    execute format(
+        'create function gridtiles.%I(z integer, x integer, y integer) returns bytea
+         language sql stable parallel safe as $f$ select gridtiles.mvt(%L, z, x, y) $f$',
+        'tile_' || name, name
+    );
 end $$;
 
 create or replace function gridtiles.drop_layer(name text) returns void
@@ -142,4 +148,5 @@ begin
         raise exception 'layer % does not exist', name using errcode = '42704';
     end if;
     execute format('drop table gridtiles.%I', 'cells_' || name);
+    execute format('drop function gridtiles.%I(integer, integer, integer)', 'tile_' || name);
 end $$;
