@@ -47,15 +47,19 @@ language sql immutable strict parallel safe as $$
     from gridtiles._columns(spec) c
 $$;
 
--- Comma-led aggregates turning source records into value columns.
-create or replace function gridtiles._aggregates(spec jsonb) returns text
+-- Comma-led aggregates turning source records into value columns. A record adds `share` (an SQL
+-- expression: 1 for points, the covered fraction for polygons) of its value to sums, and weighs
+-- its value by `area` (1 for points, the covered area for polygons) in means. min/max ignore both.
+create or replace function gridtiles._aggregates(spec jsonb, share text default '1', area text default '1') returns text
 language sql immutable strict parallel safe as $$
     select coalesce(string_agg(', ' || case
-        when c.part = 'weight' then format('sum(case when %I is not null then %s end)', c.src, w)
-        when c.agg in ('sum', 'mean') then format('sum(%I * %s)', c.src, w)
+        when c.part = 'weight' then format('sum(case when %I is not null then %s * %s end)', c.src, w, area)
+        when c.agg = 'mean' then format('sum(%I * %s * %s)', c.src, w, area)
+        when c.agg = 'sum' then format('sum(%I * %s)', c.src, share)
         else format('%s(%I)', c.merge, c.src)
     end, '' order by c.i), '')
-    from gridtiles._columns(spec) c, lateral (select case when c.agg = 'mean' then coalesce(quote_ident(c.weight), '1') else '1' end as w) x(w)
+    from gridtiles._columns(spec) c,
+        lateral (select coalesce(quote_ident(c.weight), '1')) x(w)
 $$;
 
 -- Comma-led "col = merge(a.col, b.col)" assignments, e.g. for ON CONFLICT DO UPDATE.

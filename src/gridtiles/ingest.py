@@ -1,36 +1,52 @@
-"""Load point files into a layer's base cells.
+"""Load point, polygon and raster files into a layer's base cells.
 
-Records stream in batches into a temporary staging table via binary COPY; the aggregation into
-cells happens in SQL (`gridtiles.ingest_points`).
+Records stream in batches into a temporary staging table via binary COPY (a geometry plus one
+column per value source); the aggregation into cells happens in SQL (`gridtiles.ingest_points`,
+`gridtiles.ingest_polygons`). Rasters become points at their pixel centres.
 """
 
 import json
 import math
 import struct
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from os import PathLike
 from pathlib import Path
+from typing import Literal
 
+import numpy as np
 import psycopg
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import pyogrio
-from psycopg import sql
+import rasterio
+import rasterio.warp
+from psycopg import errors, sql
 
 from gridtiles.db import layer_spec
+from gridtiles.quadkey import WORLD
 
 BATCH_SIZE = 100_000
 STAGING = "_gridtiles_staging"
-RESERVED = {"geom", "_cell"}  # staging and ingest column names a source column must not reuse
+RESERVED = {"geom", "_cell", "_g", "_share", "_area", "_a"}  # staging and ingest column names a source must not reuse
 LON_NAMES = "lon,lng,longitude,x"
 LAT_NAMES = "lat,latitude,y"
+RASTER_SUFFIXES = (".tif", ".tiff", ".vrt", ".jp2", ".nc")
+RASTER_SOURCE = "value"  # the source column name of a raster band
+MAX_CELLS_PER_FEATURE = 1_000_000
+
+Kind = Literal["point", "polygon"]
+_WKB_KINDS: dict[int, Kind] = {1: "point", 3: "polygon", 6: "polygon"}
 
 
 class UnsupportedGeometry(ValueError):
     """The source holds a geometry type this loader cannot ingest."""
+
+
+class CellLimitExceeded(ValueError):
+    """A polygon spans more base cells than `max_cells_per_feature` allows."""
 
 
 @dataclass(frozen=True)
@@ -41,10 +57,31 @@ class LoadReport:
     cells_written: int
 
 
+Path_ = str | PathLike[str]
+
+
+def load(
+    conn: psycopg.Connection,
+    layer: str,
+    path: Path_,
+    *,
+    lon: str | None = None,
+    lat: str | None = None,
+    crs: str = "EPSG:4326",
+    band: int = 1,
+    rollup: bool = True,
+    max_cells_per_feature: int | None = MAX_CELLS_PER_FEATURE,
+) -> LoadReport:
+    """Load points, polygons or a raster, detected from the source."""
+    if Path(path).suffix.lower() in RASTER_SUFFIXES:
+        return load_raster(conn, layer, path, band=band, rollup=rollup)
+    return _load_vector(conn, layer, Path(path), None, lon, lat, crs, rollup, max_cells_per_feature)
+
+
 def load_points(
     conn: psycopg.Connection,
     layer: str,
-    path: str | PathLike[str],
+    path: Path_,
     *,
     lon: str | None = None,
     lat: str | None = None,
@@ -57,33 +94,139 @@ def load_points(
     `crs` applies when the source does not declare one. Repeated loads add up. With `rollup`, the
     coarser levels and the layer stats are rebuilt afterwards.
     """
+    return _load_vector(conn, layer, Path(path), "point", lon, lat, crs, rollup, None)
+
+
+def load_polygons(
+    conn: psycopg.Connection,
+    layer: str,
+    path: Path_,
+    *,
+    crs: str = "EPSG:4326",
+    rollup: bool = True,
+    max_cells_per_feature: int | None = MAX_CELLS_PER_FEATURE,
+) -> LoadReport:
+    """Split polygons over the base cells they overlap, by covered area.
+
+    Raises `CellLimitExceeded` for a polygon spanning more than `max_cells_per_feature` base cells
+    (None: no limit). On polygon layers `n` counts touching polygons, not records.
+    """
+    return _load_vector(conn, layer, Path(path), "polygon", None, None, crs, rollup, max_cells_per_feature)
+
+
+def load_raster(conn: psycopg.Connection, layer: str, path: Path_, *, band: int = 1, rollup: bool = True) -> LoadReport:
+    """Load each valid pixel of a band as a point at the pixel centre, with the source column `value`.
+
+    Raises ValueError if pixels are larger than half a base cell; use a lower base zoom then.
+    """
+    spec = layer_spec(conn, layer)
+    sources = _sources(conn, layer)
+    if set(sources) - {RASTER_SOURCE}:
+        raise ValueError(f"raster layers read the source column {RASTER_SOURCE!r}, not {sources}")
+    with rasterio.open(path) as src:
+        srid = src.crs.to_epsg() if src.crs else None
+        if srid is None:
+            raise ValueError(f"{path}: raster CRS is not an EPSG code")
+        data = src.read(band, masked=True)
+        rows, cols = np.nonzero(~np.ma.getmaskarray(data))
+        xs, ys = rasterio.transform.xy(src.transform, rows, cols, offset="center")
+        _check_pixel_size(src, spec.base_zoom)
+    values = data.compressed().astype(float).tolist()
+    records = (
+        (struct.pack("<BIIdd", 1, 0x20000001, srid, x, y), *([v] if sources else [])) for x, y, v in zip(xs, ys, values)
+    )
+    with conn.transaction():
+        _stage(conn, sources, records)
+        cells = _ingest(conn, layer, "point", None, rollup)
+    return LoadReport(len(values), len(values), 0, cells)
+
+
+def _check_pixel_size(src: rasterio.DatasetReader, base_zoom: int) -> None:
+    """Pixel size in metres (EPSG:3857) at the raster centre vs. half the base cell size."""
+    cx, cy = src.width / 2, src.height / 2
+    (ax, ay), (bx, by) = src.transform @ (cx, cy), src.transform @ (cx + 1, cy + 1)
+    (x0, x1), (y0, y1) = rasterio.warp.transform(src.crs, "EPSG:3857", [ax, bx], [ay, by])
+    pixel = max(abs(x1 - x0), abs(y1 - y0))
+    cell = WORLD / 2**base_zoom
+    if pixel > cell / 2:
+        suggestion = math.floor(math.log2(WORLD / (2 * pixel)))
+        raise ValueError(
+            f"pixels ({pixel:.1f} m) exceed half a z{base_zoom} cell ({cell:.1f} m): use base_zoom <= {suggestion}"
+        )
+
+
+def _sources(conn: psycopg.Connection, layer: str) -> list[str]:
+    """Source columns a layer's values read: each value's `from` and `weight`."""
     spec = layer_spec(conn, layer)
     sources = list(dict.fromkeys(s for v in spec.values if v.agg != "count" for s in (v.from_, v.weight) if s))
     if clash := RESERVED.intersection(sources):
         raise ValueError(f"source columns {sorted(clash)} clash with reserved names {sorted(RESERVED)}")
-    read = loaded = 0
-    with conn.transaction(), _open(Path(path), sources, lon, lat, crs) as (srid, batches):
-        conn.execute(
-            sql.SQL("create temp table {} (geom geometry{})").format(
-                sql.Identifier(STAGING),
-                sql.SQL("").join(sql.SQL(", {} double precision").format(sql.Identifier(s)) for s in sources),
-            )
-        )
-        with conn.cursor().copy(sql.SQL("copy {} from stdin (format binary)").format(sql.Identifier(STAGING))) as copy:
-            copy.set_types(["bytea"] + ["float8"] * len(sources))
-            for batch in batches:
-                values = [pc.cast(batch.column(s), pa.float64()).to_pylist() for s in sources]
-                for i, wkb in enumerate(batch.column(0).to_pylist()):
-                    if wkb is not None and (ewkb := _point_ewkb(wkb, srid, read + i)) is not None:
-                        copy.write_row((ewkb, *(col[i] for col in values)))
-                        loaded += 1
-                read += batch.num_rows
-        row = conn.execute("select gridtiles.ingest_points(%s, %s::regclass)", (layer, STAGING)).fetchone()
-        conn.execute(sql.SQL("drop table {}").format(sql.Identifier(STAGING)))
-        if rollup:
-            conn.execute("select gridtiles.rollup(%s)", (layer,))
+    return sources
+
+
+def _load_vector(
+    conn: psycopg.Connection,
+    layer: str,
+    path: Path,
+    kind: Kind | None,
+    lon: str | None,
+    lat: str | None,
+    crs: str,
+    rollup: bool,
+    max_cells: int | None,
+) -> LoadReport:
+    sources = _sources(conn, layer)
+    counts = {"read": 0, "loaded": 0}
+    found: list[Kind] = [kind] if kind else []
+
+    def records(srid: int, batches: Iterable[pa.RecordBatch]) -> Iterator[tuple[object, ...]]:
+        for batch in batches:
+            values = [pc.cast(batch.column(s), pa.float64()).to_pylist() for s in sources]
+            for i, wkb in enumerate(batch.column(0).to_pylist()):
+                if wkb is not None:
+                    row_kind, ewkb = _ewkb(wkb, srid, counts["read"] + i)
+                    if not found:
+                        found.append(row_kind)
+                    elif row_kind != found[0]:
+                        raise UnsupportedGeometry(f"row {counts['read'] + i}: a {row_kind} among {found[0]}s")
+                    if ewkb is None:
+                        continue
+                    counts["loaded"] += 1
+                    yield (ewkb, *(col[i] for col in values))
+            counts["read"] += batch.num_rows
+
+    with conn.transaction(), _open(path, sources, lon, lat, crs) as (srid, batches):
+        _stage(conn, sources, records(srid, batches))
+        cells = _ingest(conn, layer, found[0] if found else "point", max_cells, rollup)
+    return LoadReport(counts["read"], counts["loaded"], counts["read"] - counts["loaded"], cells)
+
+
+def _stage(conn: psycopg.Connection, sources: list[str], records: Iterable[tuple[object, ...]]) -> None:
+    """COPY (ewkb, *sources) records into a temporary staging table."""
+    staging = sql.Identifier(STAGING)
+    columns = sql.SQL("").join(sql.SQL(", {} double precision").format(sql.Identifier(s)) for s in sources)
+    conn.execute(sql.SQL("create temp table {} (geom geometry{})").format(staging, columns))
+    with conn.cursor().copy(sql.SQL("copy {} from stdin (format binary)").format(staging)) as copy:
+        copy.set_types(["bytea"] + ["float8"] * len(sources))
+        for record in records:
+            copy.write_row(record)
+
+
+def _ingest(conn: psycopg.Connection, layer: str, kind: Kind, max_cells: int | None, rollup: bool) -> int:
+    """Aggregate the staging table into base cells, drop it and optionally roll up."""
+    try:
+        if kind == "polygon":
+            query = "select gridtiles.ingest_polygons(%s, %s::regclass, %s)"
+            row = conn.execute(query, (layer, STAGING, max_cells)).fetchone()
+        else:
+            row = conn.execute("select gridtiles.ingest_points(%s, %s::regclass)", (layer, STAGING)).fetchone()
+    except errors.ProgramLimitExceeded as e:
+        raise CellLimitExceeded(str(e.diag.message_primary)) from e
+    conn.execute(sql.SQL("drop table {}").format(sql.Identifier(STAGING)))
+    if rollup:
+        conn.execute("select gridtiles.rollup(%s)", (layer,))
     assert row is not None
-    return LoadReport(read, loaded, read - loaded, row[0])
+    return int(row[0])
 
 
 @contextmanager
@@ -134,20 +277,25 @@ def _srid(crs: str) -> int:
     return int(code)
 
 
-def _point_ewkb(wkb: bytes, srid: int, row: int) -> bytes | None:
-    """Check that WKB is a point and embed the SRID (EWKB), so PostGIS reads it directly.
+def _ewkb(wkb: bytes, srid: int, row: int) -> tuple[Kind, bytes | None]:
+    """Classify WKB as point or polygon and embed the SRID (EWKB), so PostGIS reads it directly.
 
-    Returns None for an empty point (NaN coordinates, as GDAL writes POINT EMPTY). EWKB input that
-    already carries an SRID is passed through unchanged.
+    The bytes are None for an empty geometry: a point with NaN coordinates (as GDAL writes POINT
+    EMPTY) or a polygon without rings. EWKB input that already carries an SRID is passed through.
     """
     order = "<" if wkb[0] == 1 else ">"
-    (kind,) = struct.unpack_from(order + "I", wkb, 1)
-    if (kind & 0xFFFF) % 1000 != 1:
-        raise UnsupportedGeometry(f"row {row}: only points are supported, got WKB geometry type {kind}")
-    has_srid = kind & 0x20000000
-    (x,) = struct.unpack_from(order + "d", wkb, 9 if has_srid else 5)
-    if math.isnan(x):
-        return None
+    (code,) = struct.unpack_from(order + "I", wkb, 1)
+    kind = _WKB_KINDS.get((code & 0xFFFF) % 1000)
+    if kind is None:
+        raise UnsupportedGeometry(f"row {row}: only points and polygons are supported, got WKB geometry type {code}")
+    has_srid = code & 0x20000000
+    body = 9 if has_srid else 5
+    if kind == "point":
+        empty = math.isnan(struct.unpack_from(order + "d", wkb, body)[0])
+    else:
+        empty = struct.unpack_from(order + "I", wkb, body)[0] == 0
+    if empty:
+        return kind, None
     if has_srid:
-        return wkb
-    return wkb[:1] + struct.pack(order + "II", kind | 0x20000000, srid) + wkb[5:]
+        return kind, wkb
+    return kind, wkb[:1] + struct.pack(order + "II", code | 0x20000000, srid) + wkb[5:]

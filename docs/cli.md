@@ -5,11 +5,11 @@ Every command takes `--db URL` and `--config FILE`. Settings precedence: flags, 
 | Command | Does |
 | --- | --- |
 | `gridtiles init` | Install or upgrade the schema; records its version in `gridtiles.meta` |
-| `gridtiles load SRC --layer NAME [--spec FILE]` | Create the layer if absent (from `--spec` or `gridtiles.toml`), load the file, roll up |
+| `gridtiles load SRC --layer NAME [--spec FILE] [--force]` | Create the layer if absent (from `--spec` or `gridtiles.toml`), load points, polygons or a raster, roll up |
 | `gridtiles layers` | List layers with zooms, published tile zooms and cell counts |
 | `gridtiles serve [--layer NAME ...]` | Serve live tiles with Martin and the viewer until interrupted |
 
-An invalid or unreadable spec, a missing layer spec or a missing database exits with status 2, as does `serve` when Martin exits on its own (e.g. on a bad database URL or a busy port).
+An invalid or unreadable spec, a missing layer spec, a missing database, an unsupported geometry or a polygon spanning more than 1,000,000 base cells (without `--force`) exits with status 2, as does `serve` when Martin exits on its own (e.g. on a bad database URL or a busy port).
 
 ```bash
 export GRIDTILES_DB=postgresql://postgres:postgres@localhost:5439/postgres
