@@ -1,17 +1,22 @@
 """Embedded serving: the viewer and tiles from any backend over one HTTP server, no tile server."""
 
 import re
+from datetime import date
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from gridtiles.backends.base import Backend
+from gridtiles.backends.base import Backend, MissingCapability
 
-TILE_PATH = re.compile(r"^/tiles/([a-z][a-z0-9_]*)/(\d+)/(\d+)/(\d+)$")
+TILE_PATH = re.compile(r"^/tiles/([a-z][a-z0-9_]*)/(\d+)/(\d+)/(\d+)(?:\?snapshot=(\d{4}-\d{2}-\d{2}))?$")
 
 
 def tile_url(name: str, port: int) -> str:
     return f"http://localhost:{port}/tiles/{name}/{{z}}/{{x}}/{{y}}"
+
+
+def snapshot_tile_url(name: str, port: int) -> str:
+    return tile_url(name, port) + "?snapshot={snapshot}"
 
 
 class _Handler(SimpleHTTPRequestHandler):
@@ -23,8 +28,8 @@ class _Handler(SimpleHTTPRequestHandler):
             return super().do_GET()
         layer, z, x, y = match[1], int(match[2]), int(match[3]), int(match[4])
         try:
-            data = self.backend.tile(layer, z, x, y)
-        except (LookupError, ValueError):
+            data = self.backend.tile(layer, z, x, y, date.fromisoformat(match[5]) if match[5] else None)
+        except (LookupError, ValueError, MissingCapability):
             self.send_error(404)
             return None
         self.send_response(200 if data else 204)

@@ -7,6 +7,7 @@ import subprocess
 import tomllib
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import date
 from pathlib import Path
 from typing import Annotated, Any, NoReturn
 
@@ -81,29 +82,35 @@ def load(
     append: Annotated[bool, typer.Option(help="Add to the layer incrementally instead of rolling up fully")] = False,
     replace_cells: Annotated[bool, typer.Option(help="Overwrite the base cells the source touches, incrementally")] = False,
     refresh_stats: Annotated[bool, typer.Option(help="With --append / --replace-cells: refresh stats and bounds")] = False,
+    snapshot: Annotated[str | None, typer.Option(help="Snapshot date (YYYY-MM-DD) on snapshot layers")] = None,
     db_url: Db = None,
     config: Config = None,
 ) -> None:
     """Load points, polygons or a raster into a layer and roll it up."""
     if append and replace_cells:
         _fail("Use either --append or --replace-cells.")
+    if snapshot and (append or replace_cells):
+        _fail("Snapshots are loaded, not upserted: drop --append / --replace-cells.")
     settings = _settings(config)
     with _backend(db_url, settings) as backend:
         try:
             backend.list_layers([layer])
+            created = False
         except LookupError:
             backend.create_layer(_layer_spec(layer, spec, settings))
+            created = True
         max_cells = None if force else MAX_CELLS_PER_FEATURE
         try:
             if append or replace_cells:
                 mode: UpsertMode = "replace" if replace_cells else "add"
                 report = backend.upsert(layer, src, mode=mode, refresh_stats=refresh_stats, max_cells_per_feature=max_cells)
             else:
-                report = backend.load(layer, src, max_cells_per_feature=max_cells)
-        except CellLimitExceeded as e:
-            _fail(f"{e} (use --force)")
-        except UnsupportedGeometry as e:
-            _fail(str(e))
+                day = date.fromisoformat(snapshot) if snapshot else None
+                report = backend.load(layer, src, max_cells_per_feature=max_cells, snapshot=day)
+        except (CellLimitExceeded, UnsupportedGeometry, MissingCapability, ValueError) as e:
+            if created:  # leave no empty layer behind
+                backend.drop_layer(layer)
+            _fail(f"{e} (use --force)" if isinstance(e, CellLimitExceeded) else str(e))
         typer.echo(report)
 
 
@@ -133,6 +140,38 @@ def export(
 
 
 @app.command()
+def diff(
+    a: Annotated[str, typer.Argument(help="Layer A, as NAME or NAME@YYYY-MM-DD")],
+    b: Annotated[str, typer.Argument(help="Layer B, as NAME or NAME@YYYY-MM-DD")],
+    name: Annotated[str, typer.Option("--as", help="Name of the new, read-only layer holding B - A")],
+    db_url: Db = None,
+    config: Config = None,
+) -> None:
+    """Store the per-cell difference B - A of two layers or snapshots as a new layer."""
+    with _backend(db_url, _settings(config)) as backend:
+        try:
+            backend.diff(a, b, name)
+        except (LookupError, ValueError, MissingCapability) as e:
+            _fail(str(e))
+    typer.echo(f"Created layer {name} = {b} - {a}")
+
+
+@app.command()
+def api(
+    port: Annotated[int, typer.Option(help="API port")] = 8000,
+    db_url: Db = None,
+    config: Config = None,
+) -> None:
+    """Serve the query API (OpenAPI docs at /docs) until interrupted."""
+    import uvicorn
+
+    from gridtiles.api import create_app
+
+    with _backend(db_url, _settings(config)) as backend:
+        uvicorn.run(create_app(backend), host="0.0.0.0", port=port)
+
+
+@app.command()
 def serve(
     layer: Annotated[list[str] | None, typer.Option(help="Layers to serve [default: all]")] = None,
     live: Annotated[
@@ -158,10 +197,20 @@ def serve(
             except MissingCapability as e:
                 _fail(f"{e}; use --embedded")
             config_path = martin.write_config(build / "martin.yaml", backend.url, layers, martin_port)
-            site = viewer.write(build / "viewer", layers, lambda lay: martin.tile_url(lay, martin_port))
+            site = viewer.write(
+                build / "viewer",
+                layers,
+                lambda lay: martin.tile_url(lay, martin_port),
+                lambda lay: martin.snapshot_tile_url(lay, martin_port),
+            )
             tiles = subprocess.Popen(martin.command(config_path))
         else:
-            site = viewer.write(build / "viewer", layers, lambda lay: server.tile_url(lay.name, port))
+            site = viewer.write(
+                build / "viewer",
+                layers,
+                lambda lay: server.tile_url(lay.name, port),
+                lambda lay: server.snapshot_tile_url(lay.name, port),
+            )
 
         def stop(*_: object) -> None:
             raise KeyboardInterrupt

@@ -3,6 +3,7 @@
 PostgreSQL is served live (Martin on the database); DuckDB embedded (tiles from the serve process).
 """
 
+import json
 import subprocess
 import time
 import urllib.error
@@ -64,6 +65,12 @@ def journey(request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFac
     subprocess.run([*cli, "init", "--db", db], check=True)
     load = [*cli, "load", str(FIXTURES / "points_10k.parquet"), "--layer", "pop", "--spec", str(FIXTURES / "spec_pop.json")]
     subprocess.run([*load, "--db", db], check=True)
+    if request.param == "postgres":  # a layer with two snapshots, for the time slider
+        spec = tmp / "spec_ts.json"
+        spec.write_text(json.dumps({**json.loads((FIXTURES / "spec_pop.json").read_text()), "snapshots": True}))
+        for path, day in (("points_10k.parquet", "2026-10-01"), ("points_10k_v2.parquet", "2026-11-01")):
+            ts = [*cli, "load", str(FIXTURES / path), "--layer", "ts", "--spec", str(spec), "--snapshot", day]
+            subprocess.run([*ts, "--db", db], check=True)
     with open_backend(db) as backend:
         expected = backend.tile("pop", 12, BLOCK.x, BLOCK.y)
 
@@ -94,7 +101,6 @@ def page(journey: Journey) -> Iterator[Page]:
         page = browser.new_page(viewport={"width": 1024, "height": 768})
         page.goto(journey.viewer)
         page.wait_for_function("window.map && window.current && window.map.loaded() && window.map.areTilesLoaded()")
-        page.evaluate("new Promise((resolve) => window.map.once('idle', resolve))")
         yield page
         browser.close()
 
@@ -143,6 +149,23 @@ def test_legend_shows_breakpoints(page: Page) -> None:
         "window.current.stats.population.breaks[0].toLocaleString(undefined, {maximumSignificantDigits: 4})"
     )
     assert first in classes.nth(0).inner_text()
+
+
+def test_time_slider_changes_features(journey: Journey, page: Page) -> None:
+    if journey.backend != "postgres":
+        pytest.skip("snapshots need PostgreSQL")
+    rendered = "JSON.stringify(window.map.queryRenderedFeatures({layers: ['cells']}).map((f) => f.properties))"
+    page.select_option("#layer", label="ts")
+    page.wait_for_function("window.current.name === 'ts' && window.map.loaded() && window.map.areTilesLoaded()")
+    assert page.is_visible("#time") and page.inner_text("#snapshot-label") == "2026-11-01"
+    latest = page.evaluate(rendered)
+    page.evaluate(
+        "() => { const s = document.getElementById('snapshot'); s.value = 0; s.dispatchEvent(new Event('input')); }"
+    )
+    assert page.inner_text("#snapshot-label") == "2026-10-01"
+    page.wait_for_function(f"(latest) => {rendered} !== latest", arg=latest)  # times out if nothing changes
+    ARTIFACTS.mkdir(parents=True, exist_ok=True)
+    page.screenshot(path=ARTIFACTS / "viewer-snapshot.png")
 
 
 def test_upsert_shows_immediately(journey: Journey, tmp_path: Path) -> None:

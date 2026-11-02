@@ -11,22 +11,16 @@ IMAGE = "ghcr.io/maplibre/martin:1.16.0"
 
 
 def config(db_url: str, layers: list[Layer], port: int) -> dict[str, Any]:
-    """One function source per layer, serving the published tile zoom range."""
+    """One function source per layer serving the published tile zoom range, and one more per
+    snapshot layer taking the snapshot from the query string."""
+    functions = {}
+    for layer in layers:
+        minzoom, maxzoom = layer.tile_zooms
+        for function in [f"tile_{layer.name}"] + ([f"tile_{layer.name}_at"] if layer.spec.snapshots else []):
+            functions[function] = {"schema": "gridtiles", "function": function, "minzoom": minzoom, "maxzoom": maxzoom}
     return {
         "listen_addresses": f"0.0.0.0:{port}",
-        "postgres": {
-            "connection_string": db_url,
-            "auto_publish": False,
-            "functions": {
-                f"tile_{layer.name}": {
-                    "schema": "gridtiles",
-                    "function": f"tile_{layer.name}",
-                    "minzoom": layer.tile_zooms[0],
-                    "maxzoom": layer.tile_zooms[1],
-                }
-                for layer in layers
-            },
-        },
+        "postgres": {"connection_string": db_url, "auto_publish": False, "functions": functions},
     }
 
 
@@ -51,3 +45,7 @@ def command(config_path: Path) -> list[str]:
 
 def tile_url(layer: Layer, port: int) -> str:
     return f"http://localhost:{port}/tile_{layer.name}/{{z}}/{{x}}/{{y}}"
+
+
+def snapshot_tile_url(layer: Layer, port: int) -> str:
+    return f"http://localhost:{port}/tile_{layer.name}_at/{{z}}/{{x}}/{{y}}?snapshot={{snapshot}}"

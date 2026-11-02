@@ -55,9 +55,9 @@ select gridtiles.drop_layer('pop');
 
 ## Ingest
 
-`ingest_points(name, staging regclass)` aggregates a staging table of points (a `geom` column plus one `double precision` column per value source and weight) into the layer's base cells at `z = base_zoom` and returns the number of cells written. Existing cells are merged, so repeated loads add up. Rows with a NULL geometry are skipped; a NULL value contributes nothing to its value's columns.
+`ingest_points(name, staging regclass, target regclass default null, snapshot date default null)` aggregates a staging table of points (a `geom` column plus one `double precision` column per value source and weight) into the layer's base cells at `z = base_zoom` and returns the number of cells written. Existing cells are merged, so repeated loads add up. Rows with a NULL geometry are skipped; a NULL value contributes nothing to its value's columns.
 
-`ingest_polygons(name, staging regclass, max_cells bigint default 1000000)` splits each polygon over the base cells it overlaps (in EPSG:3857): sums get value × covered fraction, means are weighted by covered area, min/max apply to every touched cell, and `n` counts touching polygons. A polygon whose bounding box spans more than `max_cells` base cells raises SQLSTATE `54000` (`NULL`: no limit).
+`ingest_polygons(name, staging regclass, max_cells bigint default 1000000, target regclass default null, snapshot date default null)` splits each polygon over the base cells it overlaps (in EPSG:3857): sums get value × covered fraction, means are weighted by covered area, min/max apply to every touched cell, and `n` counts touching polygons. A polygon whose bounding box spans more than `max_cells` base cells raises SQLSTATE `54000` (`NULL`: no limit).
 
 ```sql
 create temp table staging (geom geometry, pop double precision, osm_ratio double precision, area double precision);
@@ -101,3 +101,16 @@ select length(gridtiles.tile_pop(12, 2200, 1343));
 ```
 
 Published tile zooms are `[max(0, min_zoom - detail), max(0, base_zoom - detail)]`; viewers overzoom beyond.
+
+## Snapshots
+
+A spec with `"snapshots": true` keys its cells by `(snapshot, z, qk)`. Ingest functions then take the `snapshot date` the batch belongs to, `rollup(name, snapshot)` rebuilds one snapshot (or all), stats describe the latest snapshot, and `mvt(name, z, x, y, snapshot)` serves one (default: the latest). `create_layer` also creates `tile_<name>_at(z, x, y, query_params json)` for Martin, reading `snapshot` from the query string. Upserts are refused: load a new snapshot instead.
+
+## Diff
+
+`diff(a, a_snapshot, b, b_snapshot, name)` creates the read-only layer `name` holding B − A of the tile properties at every level, by a full outer join on `(z, qk)`. Missing cells count as 0 for sums and `n`; mean, min and max differences exist only where both sides have data. Both inputs need the same zooms and values; the snapshots are `NULL` for layers without snapshots.
+
+```sql
+select gridtiles.diff('pop', '2026-10-01', 'pop', '2026-11-01', 'pop_delta');
+select gridtiles.mvt('pop', 12, 2200, 1343, '2026-10-01');
+```

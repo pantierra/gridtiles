@@ -49,6 +49,8 @@ class LayerSpec(_Model):
     min_zoom: int = Field(ge=0, le=MAX_ZOOM)
     detail: int = Field(default=4, ge=0, le=8)
     values: tuple[ValueSpec, ...]
+    snapshots: bool = False  # cells keyed by (snapshot, z, qk); loads name their snapshot date
+    diff: tuple[str, str] | None = None  # set on derived, read-only layers: the "layer[@snapshot]" pair B - A
 
     @model_validator(mode="after")
     def _check(self) -> Self:

@@ -28,6 +28,7 @@ gridtiles export --layer pop -o site/pop.pmtiles   # static site for any host wi
 - [Command line](docs/cli.md)
 - [SQL reference](docs/sql.md)
 - [Python reference](docs/python.md)
+- [Query API](docs/api.md)
 
 ## Development
 
@@ -47,7 +48,7 @@ make down
 | `make db-reset` | Recreate the `gridtiles_test` database and apply `sql/*.sql` |
 | `make test` | Unit and SQL tests |
 | `make e2e` | End-to-end tests against the running services |
-| `make check` | ruff, mypy, `test` and `e2e` |
+| `make check` | ruff, mypy, import contracts, `test` and `e2e` |
 
 Override the host ports with `GRIDTILES_DB_PORT` and `GRIDTILES_MARTIN_PORT`, and point tests elsewhere with `GRIDTILES_TEST_DSN` and `GRIDTILES_MARTIN_URL`.
 

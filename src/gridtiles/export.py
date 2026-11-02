@@ -16,8 +16,8 @@ from gridtiles.layer import Layer
 
 def export_pmtiles(backend: Backend, layer: str, out_path: str | PathLike[str], *, workers: int = 4) -> Path:
     """Write every tile with data in the published zoom range to a PMTiles archive (gzip-compressed
-    MVT, fetched by `workers` threads), with `index.html` and `config.json` next to it. Exports of
-    the same data are byte-identical.
+    MVT, fetched by `workers` threads), with `index.html` and `config.json` next to it; layers
+    exported into the same folder share the viewer. Exports of the same data are byte-identical.
     """
     (info,) = backend.list_layers([layer])
     out = Path(out_path)
@@ -29,7 +29,7 @@ def export_pmtiles(backend: Backend, layer: str, out_path: str | PathLike[str], 
         for (z, x, y), data in zip(tiles, pool.map(lambda t: backend.tile(layer, *t), tiles)):
             writer.write_tile(zxy_to_tileid(z, x, y), gzip.compress(data, mtime=0))
         writer.finalize(_header(info), _metadata(info))
-    viewer.write(out.parent, [info], lambda _: out.name)
+    viewer.write(out.parent, [info], lambda _: out.name, merge=True)
     return out
 
 
