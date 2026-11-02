@@ -1,8 +1,7 @@
 import psycopg
 
 import gridtiles
-
-from ..conftest import apply_sql
+from gridtiles.db import install
 
 
 def test_postgis_version(db: psycopg.Connection) -> None:
@@ -15,6 +14,7 @@ def test_gridtiles_version_matches_package(db: psycopg.Connection) -> None:
     assert version == gridtiles.__version__
 
 
-def test_sql_files_are_idempotent(db: psycopg.Connection) -> None:
-    apply_sql(db)
-    apply_sql(db)
+def test_install_is_idempotent(db: psycopg.Connection) -> None:
+    assert install(db) == gridtiles.__version__
+    assert install(db) == gridtiles.__version__
+    assert db.execute("select value from gridtiles.meta where key = 'schema_version'").fetchone() == (gridtiles.__version__,)

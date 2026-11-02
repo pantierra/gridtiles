@@ -1,0 +1,47 @@
+"""PostgreSQL access: schema install and the layer registry."""
+
+from importlib.resources import files
+
+import psycopg
+from psycopg.types.json import Jsonb
+
+from gridtiles.layer import Layer
+from gridtiles.spec import LayerSpec
+
+
+def install(conn: psycopg.Connection) -> str:
+    """Apply the packaged `sql/*.sql` files in order (idempotent) and record the schema version."""
+    for sql_file in sorted(files("gridtiles").joinpath("sql").iterdir(), key=lambda f: f.name):
+        if sql_file.name.endswith(".sql"):
+            conn.execute(sql_file.read_text())
+    row = conn.execute(
+        "insert into gridtiles.meta values ('schema_version', gridtiles.version())"
+        " on conflict (key) do update set value = excluded.value returning value"
+    ).fetchone()
+    assert row is not None
+    return str(row[0])
+
+
+def create_layer(conn: psycopg.Connection, spec: LayerSpec) -> None:
+    conn.execute("select gridtiles.create_layer(%s)", (Jsonb(spec.model_dump(mode="json", exclude_none=True)),))
+
+
+def layer_spec(conn: psycopg.Connection, name: str) -> LayerSpec:
+    row = conn.execute("select spec from gridtiles.layers where name = %s", (name,)).fetchone()
+    if row is None:
+        raise LookupError(f"layer {name!r} does not exist")
+    return LayerSpec.model_validate(row[0])
+
+
+def layers(conn: psycopg.Connection, names: list[str] | None = None) -> list[Layer]:
+    """Registered layers, all or the named ones."""
+    rows = conn.execute(
+        "select spec, stats, cells, bounds from gridtiles.layers"
+        " where %(names)s::text[] is null or name = any(%(names)s) order by name",
+        {"names": names},
+    ).fetchall()
+    found = [Layer(LayerSpec.model_validate(spec), stats, cells, tuple(b) if b else None) for spec, stats, cells, b in rows]
+    missing = set(names or []) - {layer.name for layer in found}
+    if missing:
+        raise LookupError(f"unknown layers: {', '.join(sorted(missing))}")
+    return found
