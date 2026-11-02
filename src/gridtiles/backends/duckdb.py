@@ -14,7 +14,7 @@ import duckdb
 import pyarrow as pa
 
 from gridtiles import mvt, quadkey
-from gridtiles.backends.base import Capability, LayerExists
+from gridtiles.backends.base import Capability, LayerExists, UpsertMode
 from gridtiles.layer import Layer
 from gridtiles.sources import (
     MAX_CELLS_PER_FEATURE,
@@ -106,15 +106,16 @@ class DuckDBBackend:
     def create_layer(self, spec: LayerSpec) -> None:
         if self.conn.execute("select 1 from gridtiles.layers where name = ?", [spec.name]).fetchall():
             raise LayerExists(spec.name)
-        columns = "".join(f", {c.name} double" for c in spec.columns())
         self.conn.execute(
             "insert into gridtiles.layers (name, spec, zb, zmin, detail) values (?, ?, ?, ?, ?)",
             [spec.name, spec.model_dump_json(exclude_none=True), spec.base_zoom, spec.min_zoom, spec.detail],
         )
-        self.conn.execute(f"""
-            create table gridtiles.cells_{spec.name} (
-                z smallint, qk bigint, n bigint not null{columns}, primary key (z, qk)
-            )""")
+        self._create_cell_table(f"gridtiles.cells_{spec.name}", spec)
+
+    def _create_cell_table(self, table: str, spec: LayerSpec, temporary: bool = False) -> None:
+        columns = "".join(f", {c.name} double" for c in spec.columns())
+        kind = "temp table" if temporary else "table"
+        self.conn.execute(f"create {kind} {table} (z smallint, qk bigint, n bigint not null{columns}, primary key (z, qk))")
 
     def drop_layer(self, name: str) -> None:
         self.spec(name)
@@ -167,7 +168,10 @@ class DuckDBBackend:
             raise
         return LoadReport(records.read, records.loaded, records.read - records.loaded, cells)
 
-    def _ingest(self, spec: LayerSpec, records: Records, columns: list[str], max_cells: int | None) -> int:
+    def _ingest(
+        self, spec: LayerSpec, records: Records, columns: list[str], max_cells: int | None, target: str | None = None
+    ) -> int:
+        """Aggregate records into base cells of the layer, or of `target` (a table shaped like it)."""
         rows = list(records)
         staging = pa.table(
             {
@@ -178,14 +182,14 @@ class DuckDBBackend:
         self.conn.register("_staging", staging)
         try:
             if records.kind == "polygon":
-                return self._ingest_polygons(spec, max_cells)
+                return self._ingest_polygons(spec, max_cells, target)
             point = "ST_GeomFromWKB(wkb)"
             cell = f"gridtiles._from_mercator(ST_X({point}), ST_Y({point}), {spec.base_zoom})"
-            return self._insert_cells(spec, f"select {cell} as _cell, * from _staging", _aggregates(spec))
+            return self._insert_cells(spec, f"select {cell} as _cell, * from _staging", _aggregates(spec), target)
         finally:
             self.conn.unregister("_staging")
 
-    def _ingest_polygons(self, spec: LayerSpec, max_cells: int | None) -> int:
+    def _ingest_polygons(self, spec: LayerSpec, max_cells: int | None, target: str | None) -> int:
         """Split polygons over the base cells their bounding box covers; mirrors `ingest_polygons`."""
         zb = spec.base_zoom
         self.conn.execute(f"""
@@ -209,26 +213,33 @@ class DuckDBBackend:
                           from (select *, unnest(range(_x0, _x1 + 1)) as _x from _polygons))
                 )
                 where _a > 0"""
-            return self._insert_cells(spec, source, _aggregates(spec, "_share", "_area"))
+            return self._insert_cells(spec, source, _aggregates(spec, "_share", "_area"), target)
         finally:
             self.conn.execute("drop table _polygons")
 
-    def _insert_cells(self, spec: LayerSpec, source: str, aggregates: str) -> int:
+    def _insert_cells(self, spec: LayerSpec, source: str, aggregates: str, target: str | None = None) -> int:
         """Aggregate `source` (with a `_cell` column) into base cells, merging with existing ones."""
-        cols = spec.columns()
-        names = "".join(f", {c.name}" for c in cols)
-        merges = "".join(f", {c.name} = {_merge(c, c.name, 'excluded.' + c.name)}" for c in cols)
         self.conn.execute(f"""
             create or replace temp table _cells as
             select {spec.base_zoom}::smallint as z, _cell as qk, count(*) as n{aggregates}
             from ({source}) group by _cell""")
         try:
-            self.conn.execute(f"""
-                insert into gridtiles.cells_{spec.name} (z, qk, n{names}) select * from _cells
-                on conflict (z, qk) do update set n = n + excluded.n{merges}""")
+            self._merge_cells(spec, "_cells", target or f"gridtiles.cells_{spec.name}", "add")
             return self._count("_cells", schema="temp")
         finally:
             self.conn.execute("drop table _cells")
+
+    def _merge_cells(self, spec: LayerSpec, source: str, target: str, mode: UpsertMode) -> None:
+        """Insert cells from `source` into `target`: merged per aggregator ("add") or overwriting ("replace")."""
+        cols = spec.columns()
+        names = "".join(f", {c.name}" for c in cols)
+        if mode == "add":
+            assign = "n = n + excluded.n" + "".join(f", {c.name} = {_merge(c, c.name, 'excluded.' + c.name)}" for c in cols)
+        else:
+            assign = "n = excluded.n" + "".join(f", {c.name} = excluded.{c.name}" for c in cols)
+        self.conn.execute(f"""
+            insert into {target} (z, qk, n{names}) select z, qk, n{names} from {source}
+            on conflict (z, qk) do update set {assign}""")
 
     def _count(self, table: str, schema: str = "gridtiles") -> int:
         ((n,),) = self.conn.execute(f"select count(*) from {schema}.{table}").fetchall()
@@ -236,8 +247,11 @@ class DuckDBBackend:
 
     def rollup(self, layer: str) -> None:
         """Rebuild levels zb - 1 .. zmin from their children, then stats and bounds; mirrors `rollup`."""
-        spec = self.spec(layer)
-        cells, zb = f"gridtiles.cells_{layer}", spec.base_zoom
+        self._rebuild_levels(self.spec(layer))
+        self.refresh_stats(layer)
+
+    def _rebuild_levels(self, spec: LayerSpec) -> None:
+        cells, zb = f"gridtiles.cells_{spec.name}", spec.base_zoom
         names = "".join(f", {c.name}" for c in spec.columns())
         merges = "".join(f", {c.merge}({c.name}{' order by qk' if c.merge == 'sum' else ''})" for c in spec.columns())
         self.conn.execute(f"delete from {cells} where z < {zb}")
@@ -245,6 +259,11 @@ class DuckDBBackend:
             self.conn.execute(f"""
                 insert into {cells} (z, qk, n{names})
                 select {z}, qk >> 2, sum(n){merges} from {cells} where z = {z + 1} group by qk >> 2""")
+
+    def refresh_stats(self, layer: str) -> None:
+        """Stats, row count and bounds; mirrors `gridtiles.refresh_stats`."""
+        spec = self.spec(layer)
+        cells, zb = f"gridtiles.cells_{layer}", spec.base_zoom
         stats = {}
         for name, expr in _properties(spec).items():
             ((total, low, high, breaks),) = self.conn.execute(f"""
@@ -266,6 +285,39 @@ class DuckDBBackend:
             "update gridtiles.layers set stats = ?, cells = ?, bounds = ?, updated_at = current_timestamp where name = ?",
             [json.dumps(stats), self._count(f"cells_{layer}"), bounds, layer],
         )
+
+    def upsert(
+        self,
+        layer: str,
+        path: SourcePath,
+        *,
+        mode: UpsertMode = "add",
+        refresh_stats: bool = False,
+        kind: Kind | None = None,
+        lon: str | None = None,
+        lat: str | None = None,
+        crs: str = "EPSG:4326",
+        band: int = 1,
+        max_cells_per_feature: int | None = MAX_CELLS_PER_FEATURE,
+    ) -> LoadReport:
+        """Merge the batch into the base cells, then rebuild all levels (not incremental)."""
+        spec = self.spec(layer)
+        self.conn.begin()
+        try:
+            self._create_cell_table("_delta", spec, temporary=True)
+            with open_records(path, spec, kind=kind, lon=lon, lat=lat, crs=crs, band=band) as records:
+                self._ingest(spec, records, source_columns(spec), max_cells_per_feature, target="_delta")
+            self._merge_cells(spec, "_delta", f"gridtiles.cells_{layer}", mode)
+            written = self._count("_delta", schema="temp")
+            self.conn.execute("drop table _delta")
+            self._rebuild_levels(spec)
+            if refresh_stats:
+                self.refresh_stats(layer)
+            self.conn.commit()
+        except BaseException:
+            self.conn.rollback()
+            raise
+        return LoadReport(records.read, records.loaded, records.read - records.loaded, written)
 
     def tile(self, layer: str, z: int, x: int, y: int) -> bytes:
         """Cells at c(t) in the tile's key range, encoded in Python; mirrors `gridtiles.mvt`."""
@@ -326,19 +378,20 @@ def _merge(column: Column, a: str, b: str) -> str:
 
 
 def _aggregates(spec: LayerSpec, share: str = "1", area: str = "1") -> str:
-    """Comma-led aggregates of source records; mirrors `gridtiles._aggregates`."""
+    """Comma-led aggregates of source records, named as the columns; mirrors `gridtiles._aggregates`."""
     out = []
     for c in spec.columns():
         v = c.value
         src, w = _quote(v.from_), _quote(v.weight) if v.weight else "1"
         if c.part == "weight":
-            out.append(f", sum(case when {src} is not null then {w} * {area} end)")
+            expr = f"sum(case when {src} is not null then {w} * {area} end)"
         elif v.agg == "mean":
-            out.append(f", sum({src} * {w} * {area})")
+            expr = f"sum({src} * {w} * {area})"
         elif v.agg == "sum":
-            out.append(f", sum({src} * {share})")
+            expr = f"sum({src} * {share})"
         else:
-            out.append(f", {c.merge}({src})")
+            expr = f"{c.merge}({src})"
+        out.append(f", {expr} as {c.name}")
     return "".join(out)
 
 

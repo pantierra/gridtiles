@@ -38,11 +38,15 @@ def write_config(path: Path, db_url: str, layers: list[Layer], port: int) -> Pat
 
 
 def command(config_path: Path) -> list[str]:
-    """A local `martin` binary if there is one, otherwise the pinned Docker image on the host network."""
+    """A local `martin` binary if there is one, otherwise the pinned Docker image on the host network.
+
+    Martin's tile cache is off: tiles change as soon as an upsert commits.
+    """
+    options = ["--cache-size", "0"]
     if binary := shutil.which("martin"):
-        return [binary, "--config", str(config_path)]
+        return [binary, "--config", str(config_path), *options]
     mount = f"{config_path.resolve()}:/config/martin.yaml:ro"
-    return ["docker", "run", "--rm", "--network", "host", "-v", mount, IMAGE, "--config", "/config/martin.yaml"]
+    return ["docker", "run", "--rm", "--network", "host", "-v", mount, IMAGE, "--config", "/config/martin.yaml", *options]
 
 
 def tile_url(layer: Layer, port: int) -> str:

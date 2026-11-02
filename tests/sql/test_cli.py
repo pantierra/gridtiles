@@ -80,3 +80,13 @@ def test_duckdb_cannot_serve_live(tmp_path: Path) -> None:
     result = run("serve", "--live", "--db", db)
     assert result.exit_code == 2
     assert "'live'" in result.output and "--embedded" in result.output
+
+
+def test_append_and_replace(url: str) -> None:
+    spec = FIXTURES / "spec_pop.json"
+    assert run("load", FIXTURES / "points_small.csv", "--layer", "inc", "--spec", spec, "--db", url).exit_code == 0
+    result = run("load", FIXTURES / "points_small.csv", "--layer", "inc", "--append", "--refresh-stats", "--db", url)
+    assert result.exit_code == 0, result.output
+    assert run("load", FIXTURES / "points_small.csv", "--layer", "inc", "--replace-cells", "--db", url).exit_code == 0
+    both = run("load", FIXTURES / "points_small.csv", "--layer", "inc", "--append", "--replace-cells", "--db", url)
+    assert both.exit_code == 2
