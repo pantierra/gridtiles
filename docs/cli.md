@@ -6,6 +6,7 @@ Every command takes `--db` (a PostgreSQL URL, or a DuckDB file path) and `--conf
 | --- | --- |
 | `gridtiles init` | Install or upgrade the schema; records its version in `gridtiles.meta` |
 | `gridtiles load SRC --layer NAME [--spec FILE] [--force]` | Create the layer if absent (from `--spec` or `gridtiles.toml`), load points, polygons or a raster, roll up |
+| `gridtiles load SRC --layer NAME --append \| --replace-cells [--refresh-stats]` | Upsert: add to, or overwrite the touched cells of, an existing layer incrementally |
 | `gridtiles layers` | List layers with zooms, published tile zooms and cell counts |
 | `gridtiles serve [--layer NAME ...] [--live / --embedded]` | Serve tiles and the viewer until interrupted |
 | `gridtiles export --layer NAME -o FILE.pmtiles` | Write a PMTiles archive plus `index.html` and `config.json` next to it |

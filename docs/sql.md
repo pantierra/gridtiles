@@ -71,12 +71,22 @@ select gridtiles.ingest_polygons('pop', 'staging');  -- cells written
 
 ## Rollup
 
-`rollup(name)` rebuilds every level from `base_zoom - 1` down to `min_zoom` from its children (`qk >> 2`), merging each stored column per its aggregator, then writes `layers.stats`: per value the `total`, `min`, `max` and 7 quantile `breaks` (1/8 … 7/8) of the tile property at the base zoom. Sums run in quadkey order, so a rebuild is reproducible bit for bit.
+`rollup(name)` rebuilds every level from `base_zoom - 1` down to `min_zoom` from its children (`qk >> 2`), merging each stored column per its aggregator, then calls `refresh_stats(name)`. That writes `layers.stats` (per value the `total`, `min`, `max` and 7 quantile `breaks` (1/8 … 7/8) of the tile property at the base zoom), `layers.cells` and `layers.bounds`. Sums run in quadkey order, so a rebuild is reproducible bit for bit.
 
 ```sql
 select gridtiles.rollup('pop');
 select z, count(*), sum(n) from gridtiles.cells_pop group by z order by z;
 select stats->'population' from gridtiles.layers where name = 'pop';
+```
+
+## Upserts
+
+`apply_delta(name, delta regclass, mode text default 'add')` applies a table of base cells shaped like the layer's cell table: `add` merges them like a load, `replace` overwrites the cells they touch. It then rebuilds only the ancestors of those cells, level by level, from their four children, so the result equals a full `rollup` bit for bit and untouched rows are not rewritten. A per-layer advisory lock makes concurrent upserts apply one after the other. Stats are not refreshed (call `refresh_stats`). `ingest_points` and `ingest_polygons` take an optional `target` table to aggregate a batch into such a delta.
+
+```sql
+create temp table delta (like gridtiles.cells_pop including all);
+select gridtiles.ingest_points('pop', 'staging', 'delta');
+select gridtiles.apply_delta('pop', 'delta', 'add');
 ```
 
 ## Vector tiles

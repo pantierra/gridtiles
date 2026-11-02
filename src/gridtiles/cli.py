@@ -14,7 +14,7 @@ import typer
 from pydantic import ValidationError
 
 from gridtiles import martin, server, viewer
-from gridtiles.backends.base import Backend, MissingCapability, open_backend, require
+from gridtiles.backends.base import Backend, MissingCapability, UpsertMode, open_backend, require
 from gridtiles.export import export_pmtiles
 from gridtiles.sources import MAX_CELLS_PER_FEATURE, CellLimitExceeded, UnsupportedGeometry
 from gridtiles.spec import LayerSpec
@@ -78,18 +78,28 @@ def load(
     layer: Annotated[str, typer.Option(help="Layer name; created if absent")],
     spec: Annotated[Path | None, typer.Option(help="Layer spec JSON for a new layer")] = None,
     force: Annotated[bool, typer.Option(help="Allow polygons spanning more than 1,000,000 base cells")] = False,
+    append: Annotated[bool, typer.Option(help="Add to the layer incrementally instead of rolling up fully")] = False,
+    replace_cells: Annotated[bool, typer.Option(help="Overwrite the base cells the source touches, incrementally")] = False,
+    refresh_stats: Annotated[bool, typer.Option(help="With --append / --replace-cells: refresh stats and bounds")] = False,
     db_url: Db = None,
     config: Config = None,
 ) -> None:
     """Load points, polygons or a raster into a layer and roll it up."""
+    if append and replace_cells:
+        _fail("Use either --append or --replace-cells.")
     settings = _settings(config)
     with _backend(db_url, settings) as backend:
         try:
             backend.list_layers([layer])
         except LookupError:
             backend.create_layer(_layer_spec(layer, spec, settings))
+        max_cells = None if force else MAX_CELLS_PER_FEATURE
         try:
-            report = backend.load(layer, src, max_cells_per_feature=None if force else MAX_CELLS_PER_FEATURE)
+            if append or replace_cells:
+                mode: UpsertMode = "replace" if replace_cells else "add"
+                report = backend.upsert(layer, src, mode=mode, refresh_stats=refresh_stats, max_cells_per_feature=max_cells)
+            else:
+                report = backend.load(layer, src, max_cells_per_feature=max_cells)
         except CellLimitExceeded as e:
             _fail(f"{e} (use --force)")
         except UnsupportedGeometry as e:

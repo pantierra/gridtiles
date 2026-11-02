@@ -45,6 +45,7 @@ Every store implements the `Backend` protocol (`gridtiles.backends.base`); the C
 | `create_layer(spec)`, `drop_layer(name)` | Register or remove a layer (`LayerExists` if taken) |
 | `list_layers(names=None)` | `Layer`s with spec, stats, cell count and bounds; `LookupError` for unknown names |
 | `load(layer, path, *, kind=None, lon=None, lat=None, crs="EPSG:4326", band=1, rollup=True, max_cells_per_feature=1_000_000)` | Aggregate points, polygons or a raster into base cells, then roll up; returns a `LoadReport` |
+| `upsert(layer, path, *, mode="add", refresh_stats=False, ...)` | Apply a batch incrementally: `add` merges, `replace` overwrites the touched base cells; the result equals a full rollup. Stats, cell count and bounds only with `refresh_stats` |
 | `rollup(layer)` | Rebuild the coarser levels, stats and bounds |
 | `tile(layer, z, x, y)` | One MVT (`b""` if empty); thread-safe |
 | `tiles_with_data(layer)` | `(z, x, y)` of every tile with data in the published zoom range |
@@ -55,7 +56,8 @@ Capabilities tell what else a backend offers: `live` (an external tile server re
 | | PostgreSQL + PostGIS | DuckDB + spatial |
 | --- | --- | --- |
 | Opened with | `postgresql://…` | `cells.duckdb` |
-| Capabilities | `live`, `native_mvt` | — |
+| Capabilities | `live`, `incremental`, `native_mvt` | — |
+| Upserts | touched cells and their ancestors only | merge, then rebuild all levels |
 | Tiles | `gridtiles.mvt` in SQL, served by Martin | encoded in Python, served embedded |
 
 ### Sources
