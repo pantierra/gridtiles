@@ -52,3 +52,13 @@ select gridtiles.create_layer('{
 \d gridtiles.cells_pop   -- z, qk, n, population_sum, completeness_sum, completeness_w
 select gridtiles.drop_layer('pop');
 ```
+
+## Ingest
+
+`ingest_points(name, staging regclass)` aggregates a staging table of points (a `geom` column plus one `double precision` column per value source and weight) into the layer's base cells at `z = base_zoom` and returns the number of cells written. Existing cells are merged, so repeated loads add up. Rows with a NULL geometry are skipped; a NULL value contributes nothing to its value's columns.
+
+```sql
+create temp table staging (geom geometry, pop double precision, osm_ratio double precision, area double precision);
+insert into staging values ('SRID=4326;POINT(13.405 52.52)', 10, 0.5, 100);
+select gridtiles.ingest_points('pop', 'staging');  -- 1
+```
