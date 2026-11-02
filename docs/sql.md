@@ -74,3 +74,16 @@ select gridtiles.rollup('pop');
 select z, count(*), sum(n) from gridtiles.cells_pop group by z order by z;
 select stats->'population' from gridtiles.layers where name = 'pop';
 ```
+
+## Vector tiles
+
+`mvt(name, z, x, y)` returns one Mapbox Vector Tile with a layer `cells` (extent 4096, buffer 0). A tile at zoom `t` carries the cells at `c(t) = clamp(t + detail, min_zoom, base_zoom)`: with the default `detail = 4`, a 16 × 16 grid of sub-cells, read as one contiguous key range. Past the base zoom it carries the single ancestor cell. Each feature is a cell square with the properties `qk` (text form), `z`, `n` and one property per non-`count` value. An empty tile is a zero-length `bytea`.
+
+`create_layer` also creates `tile_<name>(z, x, y)`, the entry point for tile servers such as Martin.
+
+```sql
+select length(gridtiles.mvt('pop', 12, 2200, 1343));
+select length(gridtiles.tile_pop(12, 2200, 1343));
+```
+
+Published tile zooms are `[max(0, min_zoom - detail), max(0, base_zoom - detail)]`; viewers overzoom beyond.

@@ -141,6 +141,12 @@ begin
         (select coalesce(string_agg(format(', %I double precision', col), '' order by i), '')
          from gridtiles._columns(spec) c)
     );
+    -- Tile server entry point (Martin function source); gridtiles.mvt is defined in 040_mvt.sql.
+    execute format(
+        'create function gridtiles.%I(z integer, x integer, y integer) returns bytea
+         language sql stable parallel safe as $f$ select gridtiles.mvt(%L, z, x, y) $f$',
+        'tile_' || name, name
+    );
 end $$;
 
 create or replace function gridtiles.drop_layer(name text) returns void
@@ -151,4 +157,5 @@ begin
         raise exception 'layer % does not exist', name using errcode = '42704';
     end if;
     execute format('drop table gridtiles.%I', 'cells_' || name);
+    execute format('drop function gridtiles.%I(integer, integer, integer)', 'tile_' || name);
 end $$;
