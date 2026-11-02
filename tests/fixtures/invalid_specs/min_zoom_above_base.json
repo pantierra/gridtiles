@@ -1,0 +1,1 @@
+{"name": "pop", "base_zoom": 2, "min_zoom": 16, "values": [{"name": "population", "from": "pop", "agg": "sum"}]}

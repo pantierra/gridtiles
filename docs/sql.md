@@ -26,3 +26,29 @@ select gridtiles.qk_child_range(1, 2, 3);                    -- [32,48)
 select gridtiles.qk_from_point('SRID=4326;POINT(13.405 52.52)', 16);
 select ST_AsText(gridtiles.qk_envelope(1, 1));
 ```
+
+## Layers
+
+A layer is a row in `gridtiles.layers` plus a cell table `gridtiles.cells_<name>` with primary key `(z, qk)`, a record count `n` and the stored columns of each value:
+
+| `agg` | Stored columns | Tile property `<v>` |
+| --- | --- | --- |
+| `count` | uses `n` | — (`n`) |
+| `sum` | `<v>_sum` | `<v>_sum` |
+| `min` | `<v>_min` | `<v>_min` |
+| `max` | `<v>_max` | `<v>_max` |
+| `mean` | `<v>_sum`, `<v>_w` (weight, or 1 per record) | `<v>_sum / <v>_w` |
+
+`create_layer(spec jsonb)` validates the [layer spec](python.md#gridtilesspec) (SQLSTATE `22023` if invalid) and creates both; `drop_layer(name)` removes both.
+
+```sql
+select gridtiles.create_layer('{
+  "name": "pop", "base_zoom": 16, "min_zoom": 2, "detail": 4,
+  "values": [
+    {"name": "population", "from": "pop", "agg": "sum", "unit": "people"},
+    {"name": "completeness", "from": "osm_ratio", "agg": "mean", "weight": "area"}
+  ]
+}');
+\d gridtiles.cells_pop   -- z, qk, n, population_sum, completeness_sum, completeness_w
+select gridtiles.drop_layer('pop');
+```

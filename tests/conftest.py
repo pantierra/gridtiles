@@ -8,6 +8,7 @@ import psycopg
 import pytest
 
 SQL_DIR = Path(__file__).parent.parent / "sql"
+FIXTURES = Path(__file__).parent / "fixtures"
 TEST_DB = "gridtiles_test"
 
 
