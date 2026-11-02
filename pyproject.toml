@@ -12,6 +12,7 @@ dependencies = [
     "pyarrow>=26.0.0",
     "pydantic>=2.14.2",
     "pyogrio>=0.13.0",
+    "rasterio>=1.5.2",
     "typer>=0.27.3",
 ]
 
@@ -28,6 +29,7 @@ dev = [
     "pre-commit",
     "pytest>=8",
     "ruff",
+    "shapely>=2.2.0",
 ]
 
 [build-system]
@@ -45,7 +47,7 @@ strict = true
 files = ["src"]
 
 [[tool.mypy.overrides]]
-module = ["pyarrow.*", "pyogrio.*"]
+module = ["pyarrow.*", "pyogrio.*", "rasterio.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
