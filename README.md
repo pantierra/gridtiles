@@ -28,6 +28,7 @@ gridtiles export --layer pop -o site/pop.pmtiles   # static site for any host wi
 - [Command line](docs/cli.md)
 - [SQL reference](docs/sql.md)
 - [Python reference](docs/python.md)
+- [Query API](docs/api.md)
 
 ## Development
 

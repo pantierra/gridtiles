@@ -3,6 +3,7 @@ this module. Implementations are resolved by name, so callers never import them 
 """
 
 from collections.abc import Iterator
+from datetime import date
 from importlib import import_module
 from typing import Any, Literal, Protocol, Self
 
@@ -10,10 +11,10 @@ from gridtiles.layer import Layer
 from gridtiles.sources import MAX_CELLS_PER_FEATURE, Kind, LoadReport, SourcePath
 from gridtiles.spec import LayerSpec
 
-Capability = Literal["live", "incremental", "native_mvt"]
+Capability = Literal["live", "incremental", "native_mvt", "snapshots"]
 UpsertMode = Literal["add", "replace"]
 """live: an external tile server can read the store; incremental: upserts touch only what changed;
-native_mvt: the store encodes tiles itself."""
+native_mvt: the store encodes tiles itself; snapshots: layers keep dated versions, and diffs."""
 
 BACKENDS = {
     "postgres": "gridtiles.backends.postgres:PostgresBackend",
@@ -57,8 +58,10 @@ class Backend(Protocol):
         band: int = 1,
         rollup: bool = True,
         max_cells_per_feature: int | None = MAX_CELLS_PER_FEATURE,
+        snapshot: date | None = None,
     ) -> LoadReport:
-        """Aggregate points, polygons or a raster (detected, or forced by `kind`) into base cells."""
+        """Aggregate points, polygons or a raster (detected, or forced by `kind`) into base cells;
+        on snapshot layers into the cells of `snapshot`."""
         ...
 
     def rollup(self, layer: str) -> None: ...
@@ -82,12 +85,31 @@ class Backend(Protocol):
         """
         ...
 
-    def tile(self, layer: str, z: int, x: int, y: int) -> bytes:
-        """One MVT; empty bytes for a tile without data. Safe to call from several threads."""
+    def tile(self, layer: str, z: int, x: int, y: int, snapshot: date | None = None) -> bytes:
+        """One MVT (of `snapshot`, or the latest); empty bytes for a tile without data. Safe to call
+        from several threads."""
         ...
 
     def tiles_with_data(self, layer: str) -> Iterator[tuple[int, int, int]]:
         """(z, x, y) of every tile with data in the published zoom range."""
+        ...
+
+    def diff(self, a: str, b: str, name: str) -> None:
+        """Create the read-only layer `name` holding B - A of two "layer[@YYYY-MM-DD]" references."""
+        ...
+
+    def query(
+        self,
+        layer: str,
+        *,
+        prefix: str | None = None,
+        bbox: tuple[float, float, float, float] | None = None,
+        polygon: dict[str, Any] | None = None,
+        zoom: int | None = None,
+        snapshot: date | None = None,
+    ) -> dict[str, Any]:
+        """Stats of the cells at `zoom` (default: base zoom) in a region: a quadkey prefix, a WGS84
+        bbox (west, south, east, north) or a GeoJSON polygon; see `gridtiles.query`."""
         ...
 
     def manifest(self, layer: str) -> dict[str, Any]: ...
@@ -106,3 +128,9 @@ def open_backend(url: str, kind: str | None = None) -> Backend:
 def require(backend: Backend, capability: Capability, action: str) -> None:
     if capability not in backend.capabilities:
         raise MissingCapability(f"{action} needs a backend with {capability!r}; {type(backend).__name__} has none")
+
+
+def parse_ref(ref: str) -> tuple[str, date | None]:
+    """ "pop@2026-10-01" -> ("pop", date(2026, 10, 1)); "pop" -> ("pop", None)."""
+    name, _, day = ref.partition("@")
+    return name, date.fromisoformat(day) if day else None

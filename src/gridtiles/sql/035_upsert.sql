@@ -16,6 +16,10 @@ begin
         raise exception 'mode % not one of add, replace', mode using errcode = '22023';
     end if;
     select * into strict l from gridtiles.layers where layers.name = apply_delta.name;
+    perform gridtiles._check_writable(l);
+    if coalesce((l.spec->>'snapshots')::boolean, false) then
+        raise exception 'layer % has snapshots: load a new snapshot instead of upserting', l.name using errcode = '0A000';
+    end if;
     perform pg_advisory_xact_lock(hashtextextended('gridtiles.layer:' || l.name, 0));
     cells := format('gridtiles.%I', 'cells_' || l.name);
     execute format(

@@ -4,30 +4,39 @@
 -- merged per aggregator, so repeated loads add up. Rows are written in quadkey order, so concurrent
 -- loads into one layer lock cells in the same order and avoid deadlocks.
 
--- Signatures before `target` existed (pre-release); dropped so calls stay unambiguous.
+-- Earlier pre-release signatures; dropped so calls stay unambiguous.
 drop function if exists gridtiles._insert_cells(gridtiles.layers, text, text);
+drop function if exists gridtiles._insert_cells(gridtiles.layers, text, text, regclass);
 drop function if exists gridtiles.ingest_points(text, regclass);
+drop function if exists gridtiles.ingest_points(text, regclass, regclass);
 drop function if exists gridtiles.ingest_polygons(text, regclass, bigint);
+drop function if exists gridtiles.ingest_polygons(text, regclass, bigint, regclass);
 
--- Insert aggregated base cells from `source`, a query with a `_cell` quadkey column.
-create or replace function gridtiles._insert_cells(l gridtiles.layers, source text, aggregates text, target regclass)
-returns bigint
+-- Insert aggregated base cells from `source`, a query with a `_cell` quadkey column. Snapshot
+-- layers need the `snapshot` the cells belong to.
+create or replace function gridtiles._insert_cells(
+    l gridtiles.layers, source text, aggregates text, target regclass, snapshot date
+) returns bigint
 language plpgsql as $$
 declare
     written bigint;
+    snap text := gridtiles._snapshot(l, snapshot);
 begin
+    perform gridtiles._check_writable(l);
     execute format(
-        'insert into %s as t (z, qk, n%s) select %s, _cell, count(*)%s from (%s) s group by _cell order by _cell
-         on conflict (z, qk) do update set n = t.n + excluded.n%s',
-        coalesce(target, format('gridtiles.%I', 'cells_' || l.name)::regclass), gridtiles._column_list(l.spec), l.zb,
-        aggregates, source, gridtiles._merge_set(l.spec, 't', 'excluded')
+        'insert into %s as t (%s, n%s) select %s%s, _cell, count(*)%s from (%s) s group by _cell order by _cell
+         on conflict (%s) do update set n = t.n + excluded.n%s',
+        coalesce(target, format('gridtiles.%I', 'cells_' || l.name)::regclass), gridtiles._key(l.spec),
+        gridtiles._column_list(l.spec), coalesce(snap || ', ', ''), l.zb, aggregates, source, gridtiles._key(l.spec),
+        gridtiles._merge_set(l.spec, 't', 'excluded')
     );
     get diagnostics written = row_count;
     return written;
 end $$;
 
-create or replace function gridtiles.ingest_points(name text, staging regclass, target regclass default null)
-returns bigint
+create or replace function gridtiles.ingest_points(
+    name text, staging regclass, target regclass default null, snapshot date default null
+) returns bigint
 language plpgsql as $$
 declare
     l gridtiles.layers;
@@ -35,7 +44,7 @@ begin
     select * into strict l from gridtiles.layers where layers.name = ingest_points.name;
     return gridtiles._insert_cells(l,
         format('select gridtiles.qk_from_point(geom, %s) as _cell, * from %s where geom is not null and not ST_IsEmpty(geom)', l.zb, staging),
-        gridtiles._aggregates(l.spec), target);
+        gridtiles._aggregates(l.spec), target, snapshot);
 end $$;
 
 -- Tile index range at zoom z covered by the bounding box of an EPSG:3857 geometry.
@@ -67,7 +76,8 @@ language sql immutable strict parallel safe as $$
 $$;
 
 create or replace function gridtiles.ingest_polygons(
-    name text, staging regclass, max_cells bigint default 1000000, target regclass default null
+    name text, staging regclass, max_cells bigint default 1000000, target regclass default null,
+    snapshot date default null
 ) returns bigint
 language plpgsql as $$
 declare
@@ -100,7 +110,7 @@ begin
                  lateral (select ST_Area(ST_Intersection(p._g, ST_TileEnvelope(%s, t.x, u.y))) as _a) a
              where a._a > 0',
             l.zb, l.zb),
-        gridtiles._aggregates(l.spec, '_share', '_area'), target);
+        gridtiles._aggregates(l.spec, '_share', '_area'), target, snapshot);
     drop table _gridtiles_polygons;
     return written;
 end $$;

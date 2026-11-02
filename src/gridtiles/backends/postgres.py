@@ -5,6 +5,7 @@
 import struct
 import threading
 from collections.abc import Iterable, Iterator
+from datetime import date
 from importlib.resources import files
 from typing import Any, Self
 from urllib.parse import quote
@@ -13,7 +14,8 @@ import psycopg
 from psycopg import errors, sql
 from psycopg.types.json import Jsonb
 
-from gridtiles.backends.base import Capability, LayerExists, UpsertMode
+from gridtiles import query as region_stats
+from gridtiles.backends.base import Capability, LayerExists, UpsertMode, parse_ref
 from gridtiles.layer import Layer
 from gridtiles.sources import (
     MAX_CELLS_PER_FEATURE,
@@ -46,7 +48,7 @@ def install(conn: psycopg.Connection) -> str:
 
 
 class PostgresBackend:
-    capabilities: frozenset[Capability] = frozenset({"live", "incremental", "native_mvt"})
+    capabilities: frozenset[Capability] = frozenset({"live", "incremental", "native_mvt", "snapshots"})
 
     def __init__(self, target: str | psycopg.Connection) -> None:
         """Open a URL (autocommit; each tile thread gets its own connection) or wrap a connection
@@ -97,13 +99,22 @@ class PostgresBackend:
             " where %(names)s::text[] is null or name = any(%(names)s) order by name",
             {"names": names},
         ).fetchall()
+        specs = [LayerSpec.model_validate(r[0]) for r in rows]
         found = [
-            Layer(LayerSpec.model_validate(spec), stats, cells, tuple(b) if b else None) for spec, stats, cells, b in rows
+            Layer(spec, stats, cells, tuple(b) if b else None, self._snapshots(spec))
+            for spec, (_, stats, cells, b) in zip(specs, rows)
         ]
         missing = set(names or []) - {layer.name for layer in found}
         if missing:
             raise LookupError(f"unknown layers: {', '.join(sorted(missing))}")
         return found
+
+    def _snapshots(self, spec: LayerSpec) -> tuple[str, ...]:
+        if not spec.snapshots:
+            return ()
+        table = sql.Identifier("gridtiles", f"cells_{spec.name}")
+        query = sql.SQL("select distinct snapshot from {} where z = %s order by 1").format(table)
+        return tuple(d.isoformat() for (d,) in self.conn.execute(query, (spec.min_zoom,)).fetchall())
 
     def load(
         self,
@@ -117,13 +128,14 @@ class PostgresBackend:
         band: int = 1,
         rollup: bool = True,
         max_cells_per_feature: int | None = MAX_CELLS_PER_FEATURE,
+        snapshot: date | None = None,
     ) -> LoadReport:
         spec = self.spec(layer)
         with self.conn.transaction():
             with open_records(path, spec, kind=kind, lon=lon, lat=lat, crs=crs, band=band) as records:
-                cells = self._ingest(layer, records, source_columns(spec), max_cells_per_feature)
+                cells = self._ingest(layer, records, source_columns(spec), max_cells_per_feature, snapshot=snapshot)
             if rollup:
-                self.rollup(layer)
+                self.conn.execute("select gridtiles.rollup(%s, %s)", (layer, snapshot))
         return LoadReport(records.read, records.loaded, records.read - records.loaded, cells)
 
     def upsert(
@@ -141,6 +153,8 @@ class PostgresBackend:
         max_cells_per_feature: int | None = MAX_CELLS_PER_FEATURE,
     ) -> LoadReport:
         spec = self.spec(layer)
+        if spec.snapshots:
+            raise ValueError(f"layer {layer!r} has snapshots: load a new snapshot instead of upserting")
         delta = sql.Identifier(DELTA)
         with self.conn.transaction():
             cells = sql.Identifier("gridtiles", f"cells_{layer}")
@@ -155,7 +169,13 @@ class PostgresBackend:
         return LoadReport(records.read, records.loaded, records.read - records.loaded, int(row[0]))
 
     def _ingest(
-        self, layer: str, records: Records, columns: list[str], max_cells: int | None, target: str | None = None
+        self,
+        layer: str,
+        records: Records,
+        columns: list[str],
+        max_cells: int | None,
+        target: str | None = None,
+        snapshot: date | None = None,
     ) -> int:
         """COPY records into a staging table, then aggregate it into base cells (or `target`) in SQL."""
         staging = sql.Identifier(STAGING)
@@ -167,16 +187,18 @@ class PostgresBackend:
                 copy.write_row(record)
         try:
             if records.kind == "polygon":
-                query = "select gridtiles.ingest_polygons(%s, %s::regclass, %s, %s::regclass)"
-                row = self.conn.execute(query, (layer, STAGING, max_cells, target)).fetchone()
+                query = "select gridtiles.ingest_polygons(%s, %s::regclass, %s, %s::regclass, %s)"
+                row = self.conn.execute(query, (layer, STAGING, max_cells, target, snapshot)).fetchone()
             else:
-                query = "select gridtiles.ingest_points(%s, %s::regclass, %s::regclass)"
-                row = self.conn.execute(query, (layer, STAGING, target)).fetchone()
+                query = "select gridtiles.ingest_points(%s, %s::regclass, %s::regclass, %s)"
+                row = self.conn.execute(query, (layer, STAGING, target, snapshot)).fetchone()
         except errors.ProgramLimitExceeded as e:
             message = str(e.diag.message_primary)
             if "max_cells_per_feature" not in message:  # another limit, e.g. an index row too large
                 raise
             raise CellLimitExceeded(message) from e
+        except (errors.InvalidParameterValue, errors.FeatureNotSupported) as e:
+            raise ValueError(str(e.diag.message_primary)) from e
         self.conn.execute(sql.SQL("drop table {}").format(staging))
         assert row is not None
         return int(row[0])
@@ -184,8 +206,9 @@ class PostgresBackend:
     def rollup(self, layer: str) -> None:
         self.conn.execute("select gridtiles.rollup(%s)", (layer,))
 
-    def tile(self, layer: str, z: int, x: int, y: int) -> bytes:
-        row = self._tile_conn().execute("select gridtiles.mvt(%s, %s, %s, %s)", (layer, z, x, y)).fetchone()
+    def tile(self, layer: str, z: int, x: int, y: int, snapshot: date | None = None) -> bytes:
+        query = "select gridtiles.mvt(%s, %s, %s, %s, %s)"
+        row = self._tile_conn().execute(query, (layer, z, x, y, snapshot)).fetchone()
         assert row is not None
         return bytes(row[0])
 
@@ -199,15 +222,46 @@ class PostgresBackend:
         return conn
 
     def tiles_with_data(self, layer: str) -> Iterator[tuple[int, int, int]]:
+        """Tiles with data in the published zoom range; of the latest snapshot on snapshot layers."""
         (info,) = self.list_layers([layer])
         spec, table = info.spec, sql.Identifier("gridtiles", f"cells_{layer}")
+        latest = sql.SQL(" and snapshot = %(latest)s" if info.snapshots else "")
         for t in range(info.tile_zooms[0], info.tile_zooms[1] + 1):
             c = spec.cell_zoom(t)
             query = sql.SQL(
-                "select xy.x, xy.y from (select distinct qk >> %(shift)s as tile from {} where z = %(c)s) d,"
+                "select xy.x, xy.y from (select distinct qk >> %(shift)s as tile from {} where z = %(c)s{}) d,"
                 " gridtiles.qk_to_xy(%(t)s, tile) xy order by tile"
-            ).format(table)
-            yield from ((t, x, y) for x, y in self.conn.execute(query, {"shift": 2 * (c - t), "c": c, "t": t}).fetchall())
+            ).format(table, latest)
+            params = {"shift": 2 * (c - t), "c": c, "t": t, "latest": info.snapshots[-1] if info.snapshots else None}
+            yield from ((t, x, y) for x, y in self.conn.execute(query, params).fetchall())
+
+    def diff(self, a: str, b: str, name: str) -> None:
+        (a_name, a_day), (b_name, b_day) = parse_ref(a), parse_ref(b)
+        try:
+            with self.conn.transaction():
+                self.conn.execute("select gridtiles.diff(%s, %s, %s, %s, %s)", (a_name, a_day, b_name, b_day, name))
+        except errors.NoDataFound as e:
+            raise LookupError(f"unknown layer in {a} or {b}") from e
+        except errors.UniqueViolation as e:
+            raise LayerExists(name) from e
+        except errors.InvalidParameterValue as e:
+            raise ValueError(str(e.diag.message_primary)) from e
+
+    def query(
+        self,
+        layer: str,
+        *,
+        prefix: str | None = None,
+        bbox: tuple[float, float, float, float] | None = None,
+        polygon: dict[str, Any] | None = None,
+        zoom: int | None = None,
+        snapshot: date | None = None,
+    ) -> dict[str, Any]:
+        spec = self.spec(layer)
+        q = region_stats.build(spec, prefix=prefix, bbox=bbox, polygon=polygon, zoom=zoom, snapshot=snapshot)
+        row = self._tile_conn().execute(q.sql.encode()).fetchone()
+        assert row is not None
+        return region_stats.result(spec, q, row)
 
     def manifest(self, layer: str) -> dict[str, Any]:
         (info,) = self.list_layers([layer])

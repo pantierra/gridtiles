@@ -8,6 +8,7 @@ license-files = ["LICENSE"]
 authors = [{ name = "Development Seed" }]
 requires-python = ">=3.12"
 dependencies = [
+    "fastapi>=0.162.0",
     "numpy>=2.5.4",
     "pmtiles>=3.8.1",
     "psycopg[binary]>=3.2",
@@ -16,6 +17,7 @@ dependencies = [
     "pyogrio>=0.13.0",
     "rasterio>=1.5.2",
     "typer>=0.27.3",
+    "uvicorn>=0.54.0",
 ]
 
 [project.scripts]
@@ -23,6 +25,7 @@ gridtiles = "gridtiles.cli:app"
 
 [dependency-groups]
 dev = [
+    "httpx2>=2.16.0",
     "hypothesis>=6.170.14",
     "import-linter>=2.15",
     "mapbox-vector-tile>=2.2.0",
@@ -67,5 +70,5 @@ root_package = "gridtiles"
 [[tool.importlinter.contracts]]
 name = "The CLI and exporter use only the backend interface"
 type = "forbidden"
-source_modules = ["gridtiles.cli", "gridtiles.export", "gridtiles.server"]
+source_modules = ["gridtiles.api", "gridtiles.cli", "gridtiles.export", "gridtiles.server"]
 forbidden_modules = ["gridtiles.backends.postgres"]

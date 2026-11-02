@@ -140,26 +140,65 @@ begin
     end if;
 end $$;
 
+-- The primary key of a layer's cells: (z, qk), or (snapshot, z, qk) for snapshot layers.
+create or replace function gridtiles._key(spec jsonb) returns text
+language sql immutable strict parallel safe as $$
+    select case when coalesce((spec->>'snapshots')::boolean, false) then 'snapshot, z, qk' else 'z, qk' end
+$$;
+
+-- Loads, upserts and rollups refuse derived (diff) layers: their values are not mergeable sums.
+create or replace function gridtiles._check_writable(l gridtiles.layers) returns void
+language plpgsql immutable as $$
+begin
+    if l.spec ? 'diff' then
+        raise exception 'layer % is a read-only diff', l.name using errcode = '0A000';
+    end if;
+end $$;
+
+-- A snapshot literal for SQL text, checked against the layer: required with snapshots, else absent.
+create or replace function gridtiles._snapshot(l gridtiles.layers, snapshot date) returns text
+language plpgsql immutable as $$
+begin
+    if coalesce((l.spec->>'snapshots')::boolean, false) <> (snapshot is not null) then
+        raise exception 'layer % %', l.name,
+            case when snapshot is null then 'has snapshots: name one' else 'has no snapshots' end
+            using errcode = '22023';
+    end if;
+    return quote_literal(snapshot) || '::date';
+end $$;
+
 create or replace function gridtiles.create_layer(spec jsonb) returns void
 language plpgsql as $$
 declare
     name text := spec->>'name';
+    snapshots boolean := coalesce((spec->>'snapshots')::boolean, false);
 begin
     perform gridtiles._check_spec(spec);
     insert into gridtiles.layers (name, spec, zb, zmin, detail)
     values (name, spec, (spec->>'base_zoom')::int, (spec->>'min_zoom')::int, coalesce((spec->>'detail')::int, 4));
     execute format(
-        'create table gridtiles.%I (z smallint, qk bigint, n bigint not null%s, primary key (z, qk))',
+        'create table gridtiles.%I (%s z smallint, qk bigint, n bigint not null%s, primary key (%s))',
         'cells_' || name,
+        case when snapshots then 'snapshot date,' else '' end,
         (select coalesce(string_agg(format(', %I double precision', col), '' order by i), '')
-         from gridtiles._columns(spec) c)
+         from gridtiles._columns(spec) c),
+        gridtiles._key(spec)
     );
-    -- Tile server entry point (Martin function source); gridtiles.mvt is defined in 040_mvt.sql.
+    -- Tile server entry points (Martin function sources); gridtiles.mvt is defined in 040_mvt.sql.
+    -- tile_<name> serves the latest snapshot; tile_<name>_at the one in the query string.
     execute format(
         'create function gridtiles.%I(z integer, x integer, y integer) returns bytea
          language sql stable parallel safe as $f$ select gridtiles.mvt(%L, z, x, y) $f$',
         'tile_' || name, name
     );
+    if snapshots then
+        execute format(
+            'create function gridtiles.%I(z integer, x integer, y integer, query_params json) returns bytea
+             language sql stable parallel safe as $f$
+                 select gridtiles.mvt(%L, z, x, y, (query_params->>''snapshot'')::date) $f$',
+            'tile_' || name || '_at', name
+        );
+    end if;
 end $$;
 
 create or replace function gridtiles.drop_layer(name text) returns void
@@ -171,4 +210,5 @@ begin
     end if;
     execute format('drop table gridtiles.%I', 'cells_' || name);
     execute format('drop function gridtiles.%I(integer, integer, integer)', 'tile_' || name);
+    execute format('drop function if exists gridtiles.%I(integer, integer, integer, json)', 'tile_' || name || '_at');
 end $$;

@@ -9,8 +9,11 @@ from typing import Any
 from gridtiles.layer import Layer
 
 
-def config(layers: list[Layer], tiles: Callable[[Layer], str]) -> dict[str, Any]:
-    """`tiles` gives each layer's XYZ URL template or PMTiles path."""
+def config(
+    layers: list[Layer], tiles: Callable[[Layer], str], snapshot_tiles: Callable[[Layer], str] | None = None
+) -> dict[str, Any]:
+    """`tiles` gives each layer's XYZ URL template or PMTiles path; `snapshot_tiles` a template with
+    `{snapshot}` for layers with snapshots (the viewer then shows a time slider)."""
     return {
         "layers": [
             {
@@ -22,15 +25,22 @@ def config(layers: list[Layer], tiles: Callable[[Layer], str]) -> dict[str, Any]
                 "bounds": layer.bounds,
                 "values": [{"name": v.name, "agg": v.agg, "unit": v.unit} for v in layer.spec.values],
                 "stats": layer.stats,
+                "snapshots": list(layer.snapshots),
+                "snapshot_tiles": snapshot_tiles(layer) if snapshot_tiles and layer.snapshots else None,
             }
             for layer in layers
         ]
     }
 
 
-def write(directory: Path, layers: list[Layer], tiles: Callable[[Layer], str]) -> Path:
+def write(
+    directory: Path,
+    layers: list[Layer],
+    tiles: Callable[[Layer], str],
+    snapshot_tiles: Callable[[Layer], str] | None = None,
+) -> Path:
     """Write `index.html` and `config.json` into `directory`."""
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "index.html").write_bytes(files("gridtiles.viewer").joinpath("index.html").read_bytes())
-    (directory / "config.json").write_text(json.dumps(config(layers, tiles), indent=2) + "\n")
+    (directory / "config.json").write_text(json.dumps(config(layers, tiles, snapshot_tiles), indent=2) + "\n")
     return directory
