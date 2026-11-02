@@ -1,0 +1,89 @@
+"""The backend interface: every store implements these operations; the CLI and exporter use only
+this module. Implementations are resolved by name, so callers never import them directly.
+"""
+
+from collections.abc import Iterator
+from importlib import import_module
+from typing import Any, Literal, Protocol, Self
+
+from gridtiles.layer import Layer
+from gridtiles.sources import MAX_CELLS_PER_FEATURE, Kind, LoadReport, SourcePath
+from gridtiles.spec import LayerSpec
+
+Capability = Literal["live", "incremental", "native_mvt"]
+"""live: an external tile server can read the store; incremental: upserts touch only what changed;
+native_mvt: the store encodes tiles itself."""
+
+BACKENDS = {
+    "postgres": "gridtiles.backends.postgres:PostgresBackend",
+    "duckdb": "gridtiles.backends.duckdb:DuckDBBackend",
+}
+
+
+class MissingCapability(RuntimeError):
+    """The backend cannot do what was asked."""
+
+
+class LayerExists(ValueError):
+    """A layer with this name is already registered."""
+
+
+class Backend(Protocol):
+    capabilities: frozenset[Capability]
+    url: str  # where the data lives: a PostgreSQL URL or a DuckDB file path
+
+    def __enter__(self) -> Self: ...
+    def __exit__(self, *exc: object) -> None: ...
+
+    def install(self) -> str:
+        """Create or upgrade the gridtiles schema (idempotent); returns its version."""
+        ...
+
+    def create_layer(self, spec: LayerSpec) -> None: ...
+    def drop_layer(self, name: str) -> None: ...
+    def list_layers(self, names: list[str] | None = None) -> list[Layer]:
+        """All or the named layers; raises LookupError for an unknown name."""
+        ...
+
+    def load(
+        self,
+        layer: str,
+        path: SourcePath,
+        *,
+        kind: Kind | None = None,
+        lon: str | None = None,
+        lat: str | None = None,
+        crs: str = "EPSG:4326",
+        band: int = 1,
+        rollup: bool = True,
+        max_cells_per_feature: int | None = MAX_CELLS_PER_FEATURE,
+    ) -> LoadReport:
+        """Aggregate points, polygons or a raster (detected, or forced by `kind`) into base cells."""
+        ...
+
+    def rollup(self, layer: str) -> None: ...
+    def tile(self, layer: str, z: int, x: int, y: int) -> bytes:
+        """One MVT; empty bytes for a tile without data. Safe to call from several threads."""
+        ...
+
+    def tiles_with_data(self, layer: str) -> Iterator[tuple[int, int, int]]:
+        """(z, x, y) of every tile with data in the published zoom range."""
+        ...
+
+    def manifest(self, layer: str) -> dict[str, Any]: ...
+
+
+def open_backend(url: str, kind: str | None = None) -> Backend:
+    """Open the backend named `kind` ("postgres" or "duckdb") on `url`. By default a postgres:// or
+    postgresql:// URL or a libpq "key=value" string opens PostgreSQL, anything else a DuckDB file."""
+    kind = kind or ("postgres" if url.startswith(("postgres://", "postgresql://")) or "=" in url else "duckdb")
+    if kind not in BACKENDS:
+        raise ValueError(f"unknown backend {kind!r}; one of {', '.join(BACKENDS)}")
+    module, _, cls = BACKENDS[kind].partition(":")
+    backend: Backend = getattr(import_module(module), cls)(url)
+    return backend
+
+
+def require(backend: Backend, capability: Capability, action: str) -> None:
+    if capability not in backend.capabilities:
+        raise MissingCapability(f"{action} needs a backend with {capability!r}; {type(backend).__name__} has none")

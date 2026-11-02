@@ -1,13 +1,13 @@
 # Command line
 
-Every command takes `--db URL` and `--config FILE`. Settings precedence: flags, then `gridtiles.toml` (in the working directory unless `--config` names one), then `$GRIDTILES_DB`.
+Every command takes `--db` (a PostgreSQL URL, or a DuckDB file path) and `--config FILE`. Settings precedence: flags, then `gridtiles.toml` (in the working directory unless `--config` names one), then `$GRIDTILES_DB`.
 
 | Command | Does |
 | --- | --- |
 | `gridtiles init` | Install or upgrade the schema; records its version in `gridtiles.meta` |
 | `gridtiles load SRC --layer NAME [--spec FILE] [--force]` | Create the layer if absent (from `--spec` or `gridtiles.toml`), load points, polygons or a raster, roll up |
 | `gridtiles layers` | List layers with zooms, published tile zooms and cell counts |
-| `gridtiles serve [--layer NAME ...]` | Serve live tiles with Martin and the viewer until interrupted |
+| `gridtiles serve [--layer NAME ...] [--live / --embedded]` | Serve tiles and the viewer until interrupted |
 | `gridtiles export --layer NAME -o FILE.pmtiles` | Write a PMTiles archive plus `index.html` and `config.json` next to it |
 
 An invalid spec, a missing layer spec, a missing database, an unsupported geometry or a polygon spanning more than 1,000,000 base cells (without `--force`) exits with status 2.
@@ -21,15 +21,24 @@ gridtiles serve    # viewer on http://localhost:8080, tiles on http://localhost:
 gridtiles export --layer pop -o site/pop.pmtiles
 ```
 
+Without a server, the same works on a DuckDB file:
+
+```bash
+gridtiles init --db cells.duckdb
+gridtiles load tests/fixtures/points_10k.parquet --layer pop --spec tests/fixtures/spec_pop.json --db cells.duckdb
+gridtiles serve --db cells.duckdb   # embedded: viewer and tiles on http://localhost:8080
+```
+
 `export` writes every tile with data in the published zoom range (gzip-compressed MVT) to one archive whose metadata holds the layer manifest (`gridtiles`: version, spec, stats, bounds). Upload the folder to any static host that answers HTTP range requests (S3, R2, GitHub Pages; Python's `http.server` does not). Exports of the same data are byte-identical.
 
-`serve` writes `build/martin.yaml` (one function source `tile_<name>` per layer, serving the published tile zooms) and `build/viewer/`, then runs a local `martin` binary, or the pinned Martin Docker image on the host network when there is none. `--port`, `--martin-port` and `--build` change the defaults.
+`serve` runs live on backends that support it (PostgreSQL): it writes `build/martin.yaml` (one function source `tile_<name>` per layer, serving the published tile zooms) and `build/viewer/`, then runs a local `martin` binary, or the pinned Martin Docker image on the host network when there is none. `--embedded` (the default for DuckDB) serves tiles from the gridtiles process itself at `/tiles/<layer>/<z>/<x>/<y>`, next to the viewer. `serve --live` on a backend without the `live` capability exits with status 2. `--port`, `--martin-port` and `--build` change the defaults.
 
 ## gridtiles.toml
 
 ```toml
 [backend]
-url = "postgresql://postgres:postgres@localhost:5439/postgres"
+type = "postgres"                                        # or "duckdb"
+url = "postgresql://postgres:postgres@localhost:5439/postgres"   # duckdb: path = "cells.duckdb"
 
 [grid]
 base_zoom = 16

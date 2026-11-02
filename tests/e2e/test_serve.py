@@ -1,24 +1,37 @@
-"""The v0.1 journey: init -> load -> serve, then Martin over HTTP and the viewer in a browser."""
+"""The journey on each backend: init -> load -> serve, then tiles over HTTP and the viewer in a browser.
+
+PostgreSQL is served live (Martin on the database); DuckDB embedded (tiles from the serve process).
+"""
 
 import subprocess
 import time
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 import mercantile
-import psycopg
 import pytest
 from playwright.sync_api import Page, sync_playwright
+
+from gridtiles.backends.base import open_backend
 
 from ..conftest import FIXTURES, fresh_database
 
 pytestmark = pytest.mark.e2e
 
-MARTIN_PORT, VIEWER_PORT = 3001, 8081
 ARTIFACTS = Path("build/e2e")
 BLOCK = mercantile.tile(13.405, 52.52, 12)
+PORTS = {"postgres": (8081, 3001), "duckdb": (8082, None)}
+
+
+@dataclass
+class Journey:
+    backend: str
+    viewer: str  # base URL of the viewer
+    tiles: str  # base URL of the layer's tiles, e.g. .../tile_pop or .../tiles/pop
+    expected: bytes  # tile 12/BLOCK from the backend, before serving
 
 
 def get(url: str) -> tuple[int, bytes]:
@@ -40,33 +53,33 @@ def wait_for(url: str, deadline: float) -> None:
     raise TimeoutError(url)
 
 
-@pytest.fixture(scope="module")
-def journey(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
-    """Run the three commands from a fresh database; the map must render within 2 minutes."""
+@pytest.fixture(scope="module", params=list(PORTS))
+def journey(request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory) -> Iterator[Journey]:
+    """Run the three commands from an empty store; the map must render within 2 minutes."""
     start = time.monotonic()
-    url = fresh_database("gridtiles_e2e")
+    tmp = tmp_path_factory.mktemp(request.param)
+    db = fresh_database("gridtiles_e2e") if request.param == "postgres" else str(tmp / "cells.duckdb")
     cli = ["uv", "run", "gridtiles"]
-    subprocess.run([*cli, "init", "--db", url], check=True)
+    subprocess.run([*cli, "init", "--db", db], check=True)
     load = [*cli, "load", str(FIXTURES / "points_10k.parquet"), "--layer", "pop", "--spec", str(FIXTURES / "spec_pop.json")]
-    subprocess.run([*load, "--db", url], check=True)
-    build = tmp_path_factory.mktemp("build")
-    serve = [
-        *cli,
-        "serve",
-        "--db",
-        url,
-        "--port",
-        str(VIEWER_PORT),
-        "--martin-port",
-        str(MARTIN_PORT),
-        "--build",
-        str(build),
-    ]
+    subprocess.run([*load, "--db", db], check=True)
+    with open_backend(db) as backend:
+        expected = backend.tile("pop", 12, BLOCK.x, BLOCK.y)
+
+    port, martin_port = PORTS[request.param]
+    serve = [*cli, "serve", "--db", db, "--port", str(port), "--build", str(tmp / "build")]
+    if martin_port:
+        serve += ["--live", "--martin-port", str(martin_port)]
+        tiles = f"http://localhost:{martin_port}/tile_pop"
+    else:
+        serve += ["--embedded"]
+        tiles = f"http://localhost:{port}/tiles/pop"
     server = subprocess.Popen(serve)
     try:
-        wait_for(f"http://localhost:{MARTIN_PORT}/health", start + 120)
-        wait_for(f"http://localhost:{VIEWER_PORT}/config.json", start + 120)
-        yield url
+        if martin_port:
+            wait_for(f"http://localhost:{martin_port}/health", start + 120)
+        wait_for(f"http://localhost:{port}/config.json", start + 120)
+        yield Journey(request.param, f"http://localhost:{port}", tiles, expected)
     finally:
         server.terminate()
         server.wait(timeout=30)
@@ -74,37 +87,37 @@ def journey(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
 
 
 @pytest.fixture(scope="module")
-def page(journey: str) -> Iterator[Page]:
+def page(journey: Journey) -> Iterator[Page]:
     with sync_playwright() as p:
         browser = p.chromium.launch()
         page = browser.new_page(viewport={"width": 1024, "height": 768})
-        page.goto(f"http://localhost:{VIEWER_PORT}/")
+        page.goto(journey.viewer)
         page.wait_for_function("window.map && window.current && window.map.loaded() && window.map.areTilesLoaded()")
         yield page
         browser.close()
 
 
-def test_catalog_lists_layer(journey: str) -> None:
-    status, body = get(f"http://localhost:{MARTIN_PORT}/catalog")
+def test_martin_catalog_lists_layer(journey: Journey) -> None:
+    if journey.backend != "postgres":
+        pytest.skip("Martin serves live backends only")
+    status, body = get(journey.tiles.rsplit("/", 1)[0] + "/catalog")
     assert status == 200 and b"tile_pop" in body
 
 
-def test_tile_over_http_matches_sql(journey: str) -> None:
-    status, body = get(f"http://localhost:{MARTIN_PORT}/tile_pop/12/{BLOCK.x}/{BLOCK.y}")
-    with psycopg.connect(journey) as conn:
-        row = conn.execute("select gridtiles.mvt('pop', 12, %s, %s)", (BLOCK.x, BLOCK.y)).fetchone()
-    assert status == 200 and row is not None and len(body) > 0
-    assert body == bytes(row[0])
+def test_tile_over_http_matches_backend(journey: Journey) -> None:
+    status, body = get(f"{journey.tiles}/12/{BLOCK.x}/{BLOCK.y}")
+    assert status == 200 and len(body) > 0
+    assert body == journey.expected
 
 
-def test_empty_tile_is_204(journey: str) -> None:
-    assert get(f"http://localhost:{MARTIN_PORT}/tile_pop/12/0/0")[0] == 204
+def test_empty_tile_is_204(journey: Journey) -> None:
+    assert get(f"{journey.tiles}/12/0/0")[0] == 204
 
 
-def test_viewer_renders_cells(page: Page) -> None:
+def test_viewer_renders_cells(journey: Journey, page: Page) -> None:
     assert page.evaluate("window.map.queryRenderedFeatures({layers: ['cells']}).length") > 0
     ARTIFACTS.mkdir(parents=True, exist_ok=True)
-    page.screenshot(path=ARTIFACTS / "viewer.png")
+    page.screenshot(path=ARTIFACTS / f"viewer-{journey.backend}.png")
 
 
 def test_hover_shows_quadkey(page: Page) -> None:

@@ -35,37 +35,61 @@ spec.detail  # 4
 spec.model_dump_json()  # JSON accepted by gridtiles.create_layer
 ```
 
-## `gridtiles.ingest`
+## Backends
 
-`load(conn, layer, path, ...)` loads a file into an existing layer, detecting what it holds: points, polygons (or multipolygons) or a raster (`.tif`, `.tiff`, `.vrt`, `.jp2`, `.nc`). It rebuilds the coarser levels and stats unless `rollup=False`, and returns a `LoadReport` (`records_read`, `records_loaded`, `skipped_null_geometry`, `cells_written`). Repeated loads add up.
+Every store implements the `Backend` protocol (`gridtiles.backends.base`); the CLI and exporter use nothing else. `open_backend(url)` opens PostgreSQL for a `postgresql://` URL (or a libpq `key=value` string) and DuckDB for a file path; pass `kind="postgres"` or `"duckdb"` to choose explicitly.
 
-| Function | Reads | Values per base cell |
+| Operation | Does |
+| --- | --- |
+| `install()` | Create or upgrade the schema; returns its version |
+| `create_layer(spec)`, `drop_layer(name)` | Register or remove a layer (`LayerExists` if taken) |
+| `list_layers(names=None)` | `Layer`s with spec, stats, cell count and bounds; `LookupError` for unknown names |
+| `load(layer, path, *, kind=None, lon=None, lat=None, crs="EPSG:4326", band=1, rollup=True, max_cells_per_feature=1_000_000)` | Aggregate points, polygons or a raster into base cells, then roll up; returns a `LoadReport` |
+| `rollup(layer)` | Rebuild the coarser levels, stats and bounds |
+| `tile(layer, z, x, y)` | One MVT (`b""` if empty); thread-safe |
+| `tiles_with_data(layer)` | `(z, x, y)` of every tile with data in the published zoom range |
+| `manifest(layer)` | Version, spec, stats and bounds of a layer |
+
+Capabilities tell what else a backend offers: `live` (an external tile server reads the store), `incremental` (upserts touch only what changed), `native_mvt` (the store encodes tiles itself).
+
+| | PostgreSQL + PostGIS | DuckDB + spatial |
 | --- | --- | --- |
-| `load_points(conn, layer, path, *, lon=None, lat=None, crs="EPSG:4326", rollup=True)` | CSV (`lon` / `lat` columns, default: common names), GeoParquet (pyarrow), anything GDAL reads | each point adds its values |
-| `load_polygons(conn, layer, path, *, crs="EPSG:4326", rollup=True, max_cells_per_feature=1_000_000)` | anything GDAL reads, GeoParquet | sums get value × covered fraction; means are weighted by covered area; min/max apply to every touched cell; `n` counts touching polygons |
-| `load_raster(conn, layer, path, *, band=1, rollup=True)` | anything rasterio reads | each valid pixel is a point at its centre with the source column `value` |
+| Opened with | `postgresql://…` | `cells.duckdb` |
+| Capabilities | `live`, `native_mvt` | — |
+| Tiles | `gridtiles.mvt` in SQL, served by Martin | encoded in Python, served embedded |
 
-`crs` applies when the source declares none. A geometry other than points and polygons, or a mix of both, raises `UnsupportedGeometry`; a polygon spanning more than `max_cells_per_feature` base cells raises `CellLimitExceeded` (`None`: no limit); pixels larger than half a base cell raise `ValueError` with a suggested base zoom.
+### Sources
+
+`load` reads GeoParquet (pyarrow), anything GDAL reads (CSV with `lon` / `lat` columns, GeoJSON, Shapefile, GeoPackage…) and rasters (`.tif`, `.tiff`, `.vrt`, `.jp2`, `.nc`). Every geometry is projected once to EPSG:3857 with the spherical Web Mercator formula and latitude clamp of `quadkey.to_mercator`, so all backends see the same coordinates. `crs` applies when the source declares none.
+
+| Source | Values per base cell |
+| --- | --- |
+| Points | each point adds its values |
+| Polygons (and multipolygons) | sums get value × covered fraction; means are weighted by covered area; min/max apply to every touched cell; `n` counts touching polygons |
+| Raster band `band` | each valid pixel is a point at its centre with the source column `value` |
+
+A geometry other than points and polygons, or a mix of both, raises `UnsupportedGeometry`; a polygon spanning more than `max_cells_per_feature` base cells raises `CellLimitExceeded` (`None`: no limit); pixels larger than half a base cell raise `ValueError` with a suggested base zoom.
 
 ```python
-import psycopg
+from gridtiles.backends.base import open_backend
+from gridtiles.spec import LayerSpec
 
-from gridtiles.ingest import load
-
-with psycopg.connect("postgresql://postgres:postgres@localhost:5439/postgres") as conn:
-    print(load(conn, "pop", "tests/fixtures/points_small.csv"))
+with open_backend("cells.duckdb") as backend:  # or "postgresql://postgres:postgres@localhost:5439/postgres"
+    backend.install()
+    backend.create_layer(LayerSpec.model_validate_json(open("tests/fixtures/spec_pop.json").read()))
+    print(backend.load("pop", "tests/fixtures/points_small.csv"))
     # LoadReport(records_read=8, records_loaded=8, skipped_null_geometry=0, cells_written=3)
+    tile = backend.tile("pop", 12, 2200, 1343)
 ```
 
 ## `gridtiles.export`
 
-`export_pmtiles(conn, layer, out_path, *, workers=4)` writes the layer's tiles to a PMTiles archive, fetching them over `workers` parallel connections, and writes the viewer next to it. `manifest(layer)` is the metadata stored under the archive's `gridtiles` key.
+`export_pmtiles(backend, layer, out_path, *, workers=4)` writes the layer's tiles to a PMTiles archive, fetched by `workers` threads, and the viewer next to it. The archive metadata holds the layer manifest under `gridtiles`.
 
 ```python
-import psycopg
-
+from gridtiles.backends.base import open_backend
 from gridtiles.export import export_pmtiles
 
-with psycopg.connect("postgresql://postgres:postgres@localhost:5439/postgres") as conn:
-    export_pmtiles(conn, "pop", "site/pop.pmtiles")  # site/pop.pmtiles, site/index.html, site/config.json
+with open_backend("cells.duckdb") as backend:
+    export_pmtiles(backend, "pop", "site/pop.pmtiles")  # site/pop.pmtiles, site/index.html, site/config.json
 ```

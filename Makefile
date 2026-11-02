@@ -27,5 +27,6 @@ check:
 	uv run ruff check
 	uv run ruff format --check
 	uv run mypy
+	uv run lint-imports
 	$(MAKE) test
 	$(MAKE) e2e

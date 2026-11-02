@@ -28,6 +28,10 @@ jobs:
           enable-cache: true
       - run: uv sync
       - run: uv run playwright install --with-deps chromium
+      - uses: actions/cache@v4
+        with:
+          path: ~/.duckdb/extensions
+          key: duckdb-extensions-${{ hashFiles('uv.lock') }}
       - run: make up
       - run: make db-reset
       - run: make check

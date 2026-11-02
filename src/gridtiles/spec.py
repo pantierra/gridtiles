@@ -3,6 +3,7 @@
 `gridtiles.create_layer` in SQL repeats the critical checks, so a spec is safe from either side.
 """
 
+from dataclasses import dataclass
 from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -32,6 +33,16 @@ class ValueSpec(_Model):
         return self
 
 
+@dataclass(frozen=True)
+class Column:
+    """A stored cell column; mirrors `gridtiles._columns` in SQL."""
+
+    name: str
+    merge: Literal["sum", "min", "max"]  # how partial aggregates of the column combine
+    part: Literal["value", "weight"]  # weight: the mean's weight sidecar
+    value: ValueSpec
+
+
 class LayerSpec(_Model):
     name: str = Field(pattern=NAME_PATTERN)
     base_zoom: int = Field(ge=0, le=MAX_ZOOM)
@@ -47,3 +58,17 @@ class LayerSpec(_Model):
         if len(names) != len(set(names)):
             raise ValueError(f"duplicate value names in {names}")
         return self
+
+    def cell_zoom(self, t: int) -> int:
+        """Zoom of the cells a tile at zoom t carries: clamp(t + detail, min_zoom, base_zoom)."""
+        return min(max(t + self.detail, self.min_zoom), self.base_zoom)
+
+    def columns(self) -> list[Column]:
+        """Stored value columns in table order (count values use `n`)."""
+        out: list[Column] = []
+        for v in self.values:
+            if v.agg == "mean":
+                out += [Column(f"{v.name}_sum", "sum", "value", v), Column(f"{v.name}_w", "sum", "weight", v)]
+            elif v.agg != "count":
+                out.append(Column(f"{v.name}_{v.agg}", v.agg, "value", v))
+        return out

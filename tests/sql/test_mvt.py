@@ -9,7 +9,7 @@ import psycopg
 import pytest
 
 from gridtiles import quadkey
-from gridtiles.ingest import load_points
+from gridtiles.backends.postgres import PostgresBackend
 
 from ..fixtures.make_fixtures import dense_block, point_wkb, random_points, write_geoparquet
 from .test_ingest import SPEC, create
@@ -21,7 +21,7 @@ BLOCK = mercantile.tile(13.405, 52.52, 12)
 def block(db: psycopg.Connection, tmp_path: Path) -> psycopg.Connection:
     dense_block(tmp_path / "dense_block.parquet")
     create(db, SPEC)
-    load_points(db, "pop", tmp_path / "dense_block.parquet")
+    PostgresBackend(db).load("pop", tmp_path / "dense_block.parquet")
     return db
 
 
@@ -90,7 +90,7 @@ def test_empty_tile_is_zero_length(block: psycopg.Connection) -> None:
 def test_tile_below_range_clamps_to_min_zoom(db: psycopg.Connection, tmp_path: Path) -> None:
     dense_block(tmp_path / "dense_block.parquet")
     create(db, {**SPEC, "name": "coarse", "min_zoom": 8})
-    load_points(db, "coarse", tmp_path / "dense_block.parquet")
+    PostgresBackend(db).load("coarse", tmp_path / "dense_block.parquet")
     t = mercantile.tile(13.405, 52.52, 2)
     feats = features(tile(db, 2, t.x, t.y, "coarse"))
     assert feats and {f["properties"]["z"] for f in feats} == {8}
@@ -115,7 +115,7 @@ def test_perf_tiles(db: psycopg.Connection, tmp_path: Path) -> None:
     path = tmp_path / "points_1m.parquet"
     write_geoparquet(path, columns, [point_wkb(*p) for p in points if p is not None])
     create(db, SPEC)
-    load_points(db, "pop", path)
+    PostgresBackend(db).load("pop", path)
     rng = random.Random(5)
     timings = []
     for _ in range(500):

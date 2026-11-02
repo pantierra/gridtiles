@@ -70,3 +70,13 @@ def test_missing_database_exits_2(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     result = run("layers")
     assert result.exit_code == 2
     assert "No database" in result.output
+
+
+def test_duckdb_cannot_serve_live(tmp_path: Path) -> None:
+    db = str(tmp_path / "cells.duckdb")
+    assert run("init", "--db", db).exit_code == 0
+    spec = FIXTURES / "spec_pop.json"
+    assert run("load", FIXTURES / "points_small.csv", "--layer", "pop", "--spec", spec, "--db", db).exit_code == 0
+    result = run("serve", "--live", "--db", db)
+    assert result.exit_code == 2
+    assert "'live'" in result.output and "--embedded" in result.output
