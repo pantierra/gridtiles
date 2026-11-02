@@ -56,3 +56,16 @@ with psycopg.connect("postgresql://postgres:postgres@localhost:5439/postgres") a
     print(load(conn, "pop", "tests/fixtures/points_small.csv"))
     # LoadReport(records_read=8, records_loaded=8, skipped_null_geometry=0, cells_written=3)
 ```
+
+## `gridtiles.export`
+
+`export_pmtiles(conn, layer, out_path, *, workers=4)` writes the layer's tiles to a PMTiles archive, fetching them over `workers` parallel connections, and writes the viewer next to it. `manifest(layer)` is the metadata stored under the archive's `gridtiles` key.
+
+```python
+import psycopg
+
+from gridtiles.export import export_pmtiles
+
+with psycopg.connect("postgresql://postgres:postgres@localhost:5439/postgres") as conn:
+    export_pmtiles(conn, "pop", "site/pop.pmtiles")  # site/pop.pmtiles, site/index.html, site/config.json
+```
