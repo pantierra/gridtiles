@@ -113,6 +113,23 @@ def dense_block(path: Path) -> None:
     write_geoparquet(path, {"pop": pop, "osm_ratio": [0.5] * 256, "area": [1.0] * 256}, points)
 
 
+def points_10k_v2() -> None:
+    """points_10k with 10% of values changed, 5% of points removed and 5% added (seed 43)."""
+    rng = random.Random(43)
+    columns, points = random_points(10_000, seed=42, null_share=0.02)
+    keep = [i for i in range(10_000) if rng.random() >= 0.05]
+    out: dict[str, list] = {name: [values[i] for i in keep] for name, values in columns.items()}
+    kept = [points[i] for i in keep]
+    for i in range(len(kept)):
+        if rng.random() < 0.10:
+            out["pop"][i] = rng.randint(0, 100)
+            out["osm_ratio"][i] = rng.random()
+    added, new = random_points(500, seed=44)
+    for name in out:
+        out[name] += added[name]
+    write_geoparquet(HERE / "points_10k_v2.parquet", out, [None if p is None else point_wkb(*p) for p in kept + new])
+
+
 def polygons_500() -> None:
     """500 random rectangles and triangles, up to ~0.02 degrees across."""
     rng = random.Random(42)
@@ -151,5 +168,6 @@ def raster_100() -> None:
 if __name__ == "__main__":
     points_small()
     points_10k()
+    points_10k_v2()
     polygons_500()
     raster_100()

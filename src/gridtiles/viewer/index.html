@@ -11,13 +11,18 @@
     html, body, #map { margin: 0; height: 100%; }
     #panel { position: absolute; top: 10px; left: 10px; padding: 8px 10px; background: #fffe;
              border-radius: 4px; box-shadow: 0 1px 4px #0003; font: 12px/1.5 system-ui, sans-serif; }
-    #panel select { margin-bottom: 6px; }
+    #panel select, #time { margin-bottom: 6px; }
+    #time input { width: 100%; }
     .class span { display: inline-block; width: 14px; height: 10px; margin-right: 6px; opacity: 0.7; }
   </style>
 </head>
 <body>
   <div id="map"></div>
-  <div id="panel"><select id="layer" hidden></select><div id="title"></div><div id="legend"></div></div>
+  <div id="panel">
+    <select id="layer" hidden></select>
+    <div id="time" hidden><input id="snapshot" type="range" min="0" step="1"><div id="snapshot-label"></div></div>
+    <div id="title"></div><div id="legend"></div>
+  </div>
   <script>
     // Sequential palette (ColorBrewer YlGnBu), one colour per class.
     maplibregl.addProtocol("pmtiles", new pmtiles.Protocol().tile);
@@ -66,7 +71,25 @@
         return `<div class="class"><span style="background:${colour}"></span>${label}</div>`;
       }).join("");
       if (layer.bounds) map.fitBounds(layer.bounds, { padding: 20, animate: false });
+      showTime(layer);
       window.current = layer;
+    }
+
+    // Time slider over a layer's snapshots, starting at the latest (what `tiles` serves).
+    function showTime(layer) {
+      const time = document.getElementById("time");
+      const slider = document.getElementById("snapshot");
+      const label = document.getElementById("snapshot-label");
+      const snapshots = layer.snapshot_tiles ? layer.snapshots : [];
+      time.hidden = snapshots.length < 2;
+      slider.max = snapshots.length - 1;
+      slider.value = snapshots.length - 1;
+      label.textContent = snapshots.at(-1) ?? "";
+      slider.oninput = () => {
+        const snapshot = snapshots[slider.value];
+        label.textContent = snapshot;
+        map.getSource("cells").setTiles([layer.snapshot_tiles.replace("{snapshot}", snapshot)]);
+      };
     }
 
     map.on("mousemove", "cells", (e) => {

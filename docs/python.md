@@ -49,14 +49,16 @@ Every store implements the `Backend` protocol (`gridtiles.backends.base`); the C
 | `rollup(layer)` | Rebuild the coarser levels, stats and bounds |
 | `tile(layer, z, x, y)` | One MVT (`b""` if empty); thread-safe |
 | `tiles_with_data(layer)` | `(z, x, y)` of every tile with data in the published zoom range |
-| `manifest(layer)` | Version, spec, stats and bounds of a layer |
+| `query(layer, *, prefix=None, bbox=None, polygon=None, zoom=None, snapshot=None)` | Stats of the cells in a region (see [api.md](api.md)) |
+| `diff(a, b, name)` | Create the read-only layer `name` = B − A of two `"layer[@YYYY-MM-DD]"` references |
+| `manifest(layer)` | Version, spec, stats, bounds and snapshots of a layer |
 
-Capabilities tell what else a backend offers: `live` (an external tile server reads the store), `incremental` (upserts touch only what changed), `native_mvt` (the store encodes tiles itself).
+Capabilities tell what else a backend offers: `live` (an external tile server reads the store), `incremental` (upserts touch only what changed), `native_mvt` (the store encodes tiles itself), `snapshots` (dated versions of a layer, `load(..., snapshot=)`, `tile(..., snapshot=)` and `diff`). A backend raises `MissingCapability` for what it lacks.
 
 | | PostgreSQL + PostGIS | DuckDB + spatial |
 | --- | --- | --- |
 | Opened with | `postgresql://…` | `cells.duckdb` |
-| Capabilities | `live`, `incremental`, `native_mvt` | — |
+| Capabilities | `live`, `incremental`, `native_mvt`, `snapshots` | — |
 | Upserts | touched cells and their ancestors only | merge, then rebuild all levels |
 | Tiles | `gridtiles.mvt` in SQL, served by Martin | encoded in Python, served embedded |
 

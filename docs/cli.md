@@ -10,6 +10,9 @@ Every command takes `--db` (a PostgreSQL URL, or a DuckDB file path) and `--conf
 | `gridtiles layers` | List layers with zooms, published tile zooms and cell counts |
 | `gridtiles serve [--layer NAME ...] [--live / --embedded]` | Serve tiles and the viewer until interrupted |
 | `gridtiles export --layer NAME -o FILE.pmtiles` | Write a PMTiles archive plus `index.html` and `config.json` next to it |
+| `gridtiles load SRC --layer NAME --snapshot YYYY-MM-DD` | Load a snapshot into a layer whose spec has `"snapshots": true` |
+| `gridtiles diff A B --as NAME` | Store B − A of two layers or snapshots (`NAME@YYYY-MM-DD`) as a read-only layer |
+| `gridtiles api [--port 8000]` | Serve the [query API](api.md) |
 
 An invalid spec, a missing layer spec, a missing database, an unsupported geometry or a polygon spanning more than 1,000,000 base cells (without `--force`) exits with status 2.
 
@@ -61,4 +64,4 @@ weight = "area"
 
 ## Viewer
 
-The viewer styles the layer's first value in 8 classes on the `stats` breakpoints. Sums and counts are shown per base cell (`value / 4^(base_zoom - z)`), so the base-zoom breakpoints hold at every zoom. Hovering a cell shows its quadkey, zoom, `n` and values. With several layers, a selector switches between them.
+The viewer styles the layer's first value in 8 classes on the `stats` breakpoints. Layers with snapshots get a time slider. Sums and counts are shown per base cell (`value / 4^(base_zoom - z)`), so the base-zoom breakpoints hold at every zoom. Hovering a cell shows its quadkey, zoom, `n` and values. With several layers, a selector switches between them.

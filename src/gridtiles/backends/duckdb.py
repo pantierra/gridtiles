@@ -8,13 +8,15 @@ full rebuilds, and there is no live tile server.
 import json
 import threading
 from collections.abc import Iterator
+from datetime import date
 from typing import Any, Self
 
 import duckdb
 import pyarrow as pa
 
 from gridtiles import mvt, quadkey
-from gridtiles.backends.base import Capability, LayerExists, UpsertMode
+from gridtiles import query as region_stats
+from gridtiles.backends.base import Capability, LayerExists, MissingCapability, UpsertMode
 from gridtiles.layer import Layer
 from gridtiles.sources import (
     MAX_CELLS_PER_FEATURE,
@@ -104,6 +106,8 @@ class DuckDBBackend:
         return __version__
 
     def create_layer(self, spec: LayerSpec) -> None:
+        if spec.snapshots:
+            raise MissingCapability("snapshot layers need a backend with 'snapshots' (PostgreSQL)")
         if self.conn.execute("select 1 from gridtiles.layers where name = ?", [spec.name]).fetchall():
             raise LayerExists(spec.name)
         self.conn.execute(
@@ -154,7 +158,10 @@ class DuckDBBackend:
         band: int = 1,
         rollup: bool = True,
         max_cells_per_feature: int | None = MAX_CELLS_PER_FEATURE,
+        snapshot: date | None = None,
     ) -> LoadReport:
+        if snapshot is not None:
+            raise MissingCapability("snapshots need a backend with 'snapshots' (PostgreSQL)")
         spec = self.spec(layer)
         self.conn.begin()
         try:
@@ -319,8 +326,10 @@ class DuckDBBackend:
             raise
         return LoadReport(records.read, records.loaded, records.read - records.loaded, written)
 
-    def tile(self, layer: str, z: int, x: int, y: int) -> bytes:
+    def tile(self, layer: str, z: int, x: int, y: int, snapshot: date | None = None) -> bytes:
         """Cells at c(t) in the tile's key range, encoded in Python; mirrors `gridtiles.mvt`."""
+        if snapshot is not None:
+            raise MissingCapability("snapshots need a backend with 'snapshots' (PostgreSQL)")
         cursor = self._cursor()
         spec, properties = self._tile_layout(layer, cursor)
         tile = quadkey.from_xyz(z, x, y)
@@ -364,6 +373,25 @@ class DuckDBBackend:
                 f"select distinct qk >> {2 * (c - t)} as tile from gridtiles.cells_{layer} where z = {c} order by tile"
             ).fetchall()
             yield from ((t, *quadkey.to_xy(t, tile)) for (tile,) in rows)
+
+    def diff(self, a: str, b: str, name: str) -> None:
+        raise MissingCapability("diffs need a backend with 'snapshots' (PostgreSQL)")
+
+    def query(
+        self,
+        layer: str,
+        *,
+        prefix: str | None = None,
+        bbox: tuple[float, float, float, float] | None = None,
+        polygon: dict[str, Any] | None = None,
+        zoom: int | None = None,
+        snapshot: date | None = None,
+    ) -> dict[str, Any]:
+        cursor = self._cursor()
+        spec = self.spec(layer, cursor)
+        q = region_stats.build(spec, prefix=prefix, bbox=bbox, polygon=polygon, zoom=zoom, snapshot=snapshot)
+        ((row),) = cursor.execute(q.sql).fetchall()
+        return region_stats.result(spec, q, row)
 
     def manifest(self, layer: str) -> dict[str, Any]:
         (info,) = self.list_layers([layer])

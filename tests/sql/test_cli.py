@@ -90,3 +90,23 @@ def test_append_and_replace(url: str) -> None:
     assert run("load", FIXTURES / "points_small.csv", "--layer", "inc", "--replace-cells", "--db", url).exit_code == 0
     both = run("load", FIXTURES / "points_small.csv", "--layer", "inc", "--append", "--replace-cells", "--db", url)
     assert both.exit_code == 2
+
+
+def test_snapshots_and_diff(url: str, tmp_path: Path) -> None:
+    spec = tmp_path / "spec_ts.json"
+    spec.write_text(json.dumps({**json.loads((FIXTURES / "spec_pop.json").read_text()), "snapshots": True}))
+    for path, day in (("points_10k.parquet", "2026-10-01"), ("points_10k_v2.parquet", "2026-11-01")):
+        result = run("load", FIXTURES / path, "--layer", "ts", "--spec", spec, "--snapshot", day, "--db", url)
+        assert result.exit_code == 0, result.output
+    assert run("load", FIXTURES / "points_small.csv", "--layer", "ts", "--db", url).exit_code == 2  # snapshot missing
+    result = run("diff", "ts@2026-10-01", "ts@2026-11-01", "--as", "ts_delta", "--db", url)
+    assert result.exit_code == 0, result.output
+    assert "ts_delta" in run("layers", "--db", url).output
+    assert run("diff", "ts@2026-10-01", "missing", "--as", "nope", "--db", url).exit_code == 2
+
+
+def test_duckdb_refuses_diff(tmp_path: Path) -> None:
+    db = str(tmp_path / "cells.duckdb")
+    run("init", "--db", db)
+    result = run("diff", "a", "b", "--as", "c", "--db", db)
+    assert result.exit_code == 2 and "snapshots" in result.output

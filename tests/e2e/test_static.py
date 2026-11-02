@@ -51,7 +51,6 @@ def test_static_site_renders(exported: tuple[str, Path]) -> None:  # noqa: F811
             page = browser.new_page()
             page.goto(f"http://localhost:{server.server_port}/")
             page.wait_for_function("window.map && window.current && window.map.loaded() && window.map.areTilesLoaded()")
-            page.evaluate("new Promise((resolve) => window.map.once('idle', resolve))")
             assert page.evaluate("window.map.queryRenderedFeatures({layers: ['cells']}).length") > 0
             browser.close()
     finally:
