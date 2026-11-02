@@ -27,9 +27,16 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync
+      - run: uv run playwright install --with-deps chromium
       - run: make up
       - run: make db-reset
       - run: make check
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e
+          path: build/e2e
+          if-no-files-found: ignore
       - if: always()
         run: docker compose logs
       - if: always()

@@ -5,8 +5,6 @@ services:
       POSTGRES_PASSWORD: postgres
     ports:
       - "${GRIDTILES_DB_PORT:-5439}:5432"
-    volumes:
-      - ./sql:/sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 2s
@@ -19,7 +17,7 @@ services:
     ports:
       - "${GRIDTILES_MARTIN_PORT:-3000}:3000"
     volumes:
-      - ./build/martin.yaml:/config/martin.yaml:ro
+      - ./build/compose/martin.yaml:/config/martin.yaml:ro
     depends_on:
       db:
         condition: service_healthy

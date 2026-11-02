@@ -8,6 +8,8 @@ create table if not exists gridtiles.layers (
     zmin smallint not null,
     detail smallint not null,
     stats jsonb,
+    cells bigint,  -- rows over all zooms, set by rollup
+    bounds double precision[],  -- [west, south, east, north] in WGS84 of the cells at zb, set by rollup
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now()
 );
