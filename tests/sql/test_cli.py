@@ -90,3 +90,13 @@ def test_missing_database_exits_2(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     result = run("layers")
     assert result.exit_code == 2
     assert "No database" in result.output
+
+
+def test_append_and_replace(url: str) -> None:
+    spec = FIXTURES / "spec_pop.json"
+    assert run("load", FIXTURES / "points_small.csv", "--layer", "inc", "--spec", spec, "--db", url).exit_code == 0
+    result = run("load", FIXTURES / "points_small.csv", "--layer", "inc", "--append", "--refresh-stats", "--db", url)
+    assert result.exit_code == 0, result.output
+    assert run("load", FIXTURES / "points_small.csv", "--layer", "inc", "--replace-cells", "--db", url).exit_code == 0
+    both = run("load", FIXTURES / "points_small.csv", "--layer", "inc", "--append", "--replace-cells", "--db", url)
+    assert both.exit_code == 2

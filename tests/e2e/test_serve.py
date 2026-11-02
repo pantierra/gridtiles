@@ -29,6 +29,7 @@ PORTS = {"postgres": (8081, 3001), "postgres-embedded": (8082, None)}
 @dataclass
 class Journey:
     backend: str
+    db: str
     viewer: str  # base URL of the viewer
     tiles: str  # base URL of the layer's tiles, e.g. .../tile_pop or .../tiles/pop
     expected: bytes  # tile 12/BLOCK from the backend, before serving
@@ -79,7 +80,7 @@ def journey(request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFac
         if martin_port:
             wait_for(f"http://localhost:{martin_port}/health", start + 120)
         wait_for(f"http://localhost:{port}/config.json", start + 120)
-        yield Journey(request.param, f"http://localhost:{port}", tiles, expected)
+        yield Journey(request.param, db, f"http://localhost:{port}", tiles, expected)
     finally:
         server.terminate()
         server.wait(timeout=30)
@@ -141,3 +142,14 @@ def test_legend_shows_breakpoints(page: Page) -> None:
         "window.current.stats.population.breaks[0].toLocaleString(undefined, {maximumSignificantDigits: 4})"
     )
     assert first in classes.nth(0).inner_text()
+
+
+def test_upsert_shows_immediately(journey: Journey, tmp_path: Path) -> None:
+    """Runs last in the module: it changes the data the tests above read."""
+    db = journey.db
+    append = ["uv", "run", "gridtiles", "load", str(FIXTURES / "points_small.csv"), "--layer", "pop", "--append"]
+    subprocess.run([*append, "--db", db], check=True)
+    with open_backend(db) as backend:
+        updated = backend.tile("pop", 12, BLOCK.x, BLOCK.y)
+    assert updated != journey.expected
+    assert get(f"{journey.tiles}/12/{BLOCK.x}/{BLOCK.y}") == (200, updated)

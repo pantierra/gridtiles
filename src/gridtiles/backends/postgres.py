@@ -13,7 +13,7 @@ import psycopg
 from psycopg import errors, sql
 from psycopg.types.json import Jsonb
 
-from gridtiles.backends.base import Capability, LayerExists
+from gridtiles.backends.base import Capability, LayerExists, UpsertMode
 from gridtiles.layer import Layer
 from gridtiles.sources import (
     MAX_CELLS_PER_FEATURE,
@@ -29,6 +29,7 @@ from gridtiles.sources import (
 from gridtiles.spec import LayerSpec
 
 STAGING = "_gridtiles_staging"
+DELTA = "_gridtiles_delta"
 
 
 def install(conn: psycopg.Connection) -> str:
@@ -45,7 +46,7 @@ def install(conn: psycopg.Connection) -> str:
 
 
 class PostgresBackend:
-    capabilities: frozenset[Capability] = frozenset({"live", "native_mvt"})
+    capabilities: frozenset[Capability] = frozenset({"live", "incremental", "native_mvt"})
 
     def __init__(self, target: str | psycopg.Connection) -> None:
         """Open a URL (autocommit; each tile thread gets its own connection) or wrap a connection
@@ -125,8 +126,38 @@ class PostgresBackend:
                 self.rollup(layer)
         return LoadReport(records.read, records.loaded, records.read - records.loaded, cells)
 
-    def _ingest(self, layer: str, records: Records, columns: list[str], max_cells: int | None) -> int:
-        """COPY records into a staging table, then aggregate it into base cells in SQL."""
+    def upsert(
+        self,
+        layer: str,
+        path: SourcePath,
+        *,
+        mode: UpsertMode = "add",
+        refresh_stats: bool = False,
+        kind: Kind | None = None,
+        lon: str | None = None,
+        lat: str | None = None,
+        crs: str = "EPSG:4326",
+        band: int = 1,
+        max_cells_per_feature: int | None = MAX_CELLS_PER_FEATURE,
+    ) -> LoadReport:
+        spec = self.spec(layer)
+        delta = sql.Identifier(DELTA)
+        with self.conn.transaction():
+            cells = sql.Identifier("gridtiles", f"cells_{layer}")
+            self.conn.execute(sql.SQL("create temp table {} (like {} including all)").format(delta, cells))
+            with open_records(path, spec, kind=kind, lon=lon, lat=lat, crs=crs, band=band) as records:
+                self._ingest(layer, records, source_columns(spec), max_cells_per_feature, target=DELTA)
+            row = self.conn.execute("select gridtiles.apply_delta(%s, %s::regclass, %s)", (layer, DELTA, mode)).fetchone()
+            self.conn.execute(sql.SQL("drop table {}").format(delta))
+            if refresh_stats:
+                self.conn.execute("select gridtiles.refresh_stats(%s)", (layer,))
+        assert row is not None
+        return LoadReport(records.read, records.loaded, records.read - records.loaded, int(row[0]))
+
+    def _ingest(
+        self, layer: str, records: Records, columns: list[str], max_cells: int | None, target: str | None = None
+    ) -> int:
+        """COPY records into a staging table, then aggregate it into base cells (or `target`) in SQL."""
         staging = sql.Identifier(STAGING)
         typed = sql.SQL("").join(sql.SQL(", {} double precision").format(sql.Identifier(c)) for c in columns)
         self.conn.execute(sql.SQL("create temp table {} (geom geometry{})").format(staging, typed))
@@ -136,10 +167,11 @@ class PostgresBackend:
                 copy.write_row(record)
         try:
             if records.kind == "polygon":
-                query = "select gridtiles.ingest_polygons(%s, %s::regclass, %s)"
-                row = self.conn.execute(query, (layer, STAGING, max_cells)).fetchone()
+                query = "select gridtiles.ingest_polygons(%s, %s::regclass, %s, %s::regclass)"
+                row = self.conn.execute(query, (layer, STAGING, max_cells, target)).fetchone()
             else:
-                row = self.conn.execute("select gridtiles.ingest_points(%s, %s::regclass)", (layer, STAGING)).fetchone()
+                query = "select gridtiles.ingest_points(%s, %s::regclass, %s::regclass)"
+                row = self.conn.execute(query, (layer, STAGING, target)).fetchone()
         except errors.ProgramLimitExceeded as e:
             message = str(e.diag.message_primary)
             if "max_cells_per_feature" not in message:  # another limit, e.g. an index row too large

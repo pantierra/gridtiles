@@ -91,6 +91,13 @@ language sql immutable strict parallel safe as $$
     order by e.i
 $$;
 
+-- Comma-led "col = b.col" assignments, overwriting every value column.
+create or replace function gridtiles._replace_set(spec jsonb, b text) returns text
+language sql immutable strict parallel safe as $$
+    select coalesce(string_agg(format(', %I = %s.%I', col, b, col), '' order by i), '')
+    from gridtiles._columns(spec) c
+$$;
+
 create or replace function gridtiles._check_spec(spec jsonb) returns void
 language plpgsql immutable parallel safe as $$
 declare

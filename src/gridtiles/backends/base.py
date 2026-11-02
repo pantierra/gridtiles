@@ -11,6 +11,7 @@ from gridtiles.sources import MAX_CELLS_PER_FEATURE, Kind, LoadReport, SourcePat
 from gridtiles.spec import LayerSpec
 
 Capability = Literal["live", "incremental", "native_mvt"]
+UpsertMode = Literal["add", "replace"]
 """live: an external tile server can read the store; incremental: upserts touch only what changed;
 native_mvt: the store encodes tiles itself."""
 
@@ -61,6 +62,26 @@ class Backend(Protocol):
         ...
 
     def rollup(self, layer: str) -> None: ...
+    def upsert(
+        self,
+        layer: str,
+        path: SourcePath,
+        *,
+        mode: UpsertMode = "add",
+        refresh_stats: bool = False,
+        kind: Kind | None = None,
+        lon: str | None = None,
+        lat: str | None = None,
+        crs: str = "EPSG:4326",
+        band: int = 1,
+        max_cells_per_feature: int | None = MAX_CELLS_PER_FEATURE,
+    ) -> LoadReport:
+        """Apply a batch to the base cells and update what depends on them; the result equals a
+        full rollup. "add" merges like `load`; "replace" overwrites the base cells the batch touches.
+        Stats, cell count and bounds are refreshed only with `refresh_stats` (they scan the base level).
+        """
+        ...
+
     def tile(self, layer: str, z: int, x: int, y: int) -> bytes:
         """One MVT; empty bytes for a tile without data. Safe to call from several threads."""
         ...
