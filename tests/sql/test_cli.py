@@ -113,3 +113,13 @@ def test_snapshots_and_diff(url: str, tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     assert "ts_delta" in run("layers", "--db", url).output
     assert run("diff", "ts@2026-10-01", "missing", "--as", "nope", "--db", url).exit_code == 2
+
+
+def test_failed_first_load_leaves_no_layer(url: str, tmp_path: Path) -> None:
+    path = tmp_path / "line.geojson"
+    line = {"type": "LineString", "coordinates": [[13.4, 52.5], [13.5, 52.6]]}
+    feature = {"type": "Feature", "properties": {"pop": 1, "osm_ratio": 0.5, "area": 1}, "geometry": line}
+    path.write_text(json.dumps({"type": "FeatureCollection", "features": [feature]}))
+    result = run("load", path, "--layer", "lines", "--spec", FIXTURES / "spec_pop.json", "--db", url)
+    assert result.exit_code == 2
+    assert "lines" not in run("layers", "--db", url).output

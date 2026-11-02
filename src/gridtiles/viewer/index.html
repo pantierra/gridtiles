@@ -38,6 +38,7 @@
     }));
     const popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
     const fmt = (v) => (typeof v === "number" ? v.toLocaleString(undefined, { maximumSignificantDigits: 4 }) : v);
+    const esc = (v) => String(v).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);  // spec text is not trusted HTML
 
     function source(layer) {
       if (layer.tiles.endsWith(".pmtiles")) return { type: "vector", url: "pmtiles://" + new URL(layer.tiles, location.href) };
@@ -70,7 +71,7 @@
       const edges = [null, ...breaks, null];
       document.getElementById("legend").innerHTML = PALETTE.map((colour, i) => {
         const [lo, hi] = [edges[i], edges[i + 1]];
-        const label = lo === null ? `< ${fmt(hi)}` : hi === null ? `≥ ${fmt(lo)}` : `${fmt(lo)} – ${fmt(hi)}`;
+        const label = esc(lo === null ? `< ${fmt(hi)}` : hi === null ? `≥ ${fmt(lo)}` : `${fmt(lo)} – ${fmt(hi)}`);
         return `<div class="class"><span style="background:${colour}"></span>${label}</div>`;
       }).join("");
       if (layer.bounds) map.fitBounds(layer.bounds, { padding: 20, animate: false });
@@ -100,7 +101,7 @@
       const layer = window.current;
       const rows = [["qk", p.qk], ["z", p.z], ["n", fmt(p.n)]].concat(
         layer.values.filter((v) => v.agg !== "count").map((v) => [v.name, fmt(p[v.name]) + (v.unit ? ` ${v.unit}` : "")]));
-      popup.setLngLat(e.lngLat).setHTML(rows.map(([k, v]) => `<div><b>${k}</b> ${v}</div>`).join("")).addTo(map);
+      popup.setLngLat(e.lngLat).setHTML(rows.map(([k, v]) => `<div><b>${esc(k)}</b> ${esc(v)}</div>`).join("")).addTo(map);
       map.getCanvas().style.cursor = "pointer";
     });
     map.on("mouseleave", "cells", () => { popup.remove(); map.getCanvas().style.cursor = ""; });
@@ -109,7 +110,7 @@
       const select = document.getElementById("layer");
       if (config.layers.length > 1) {
         select.hidden = false;
-        select.innerHTML = config.layers.map((l, i) => `<option value="${i}">${l.name}</option>`).join("");
+        select.innerHTML = config.layers.map((l, i) => `<option value="${i}">${esc(l.name)}</option>`).join("");
         select.onchange = () => show(config.layers[select.value]);
       }
       show(config.layers[0]);

@@ -79,6 +79,8 @@ def test_diff_matches_full_outer_join(layers: PostgresBackend, db: psycopg.Conne
             assert pop == pytest.approx(bp - ap, rel=1e-12, abs=1e-9)
             expected = None if am is None or bm is None else bm - am
             assert (mean is None and expected is None) or math.isclose(mean, expected, rel_tol=1e-12, abs_tol=1e-12)
+    mismatched = "select count(*) from gridtiles.cells_delta where (completeness_sum is null) <> (completeness_w is null)"
+    assert db.execute(mismatched).fetchone() == (0,)  # a mean's weight exists exactly where its difference does
     with pytest.raises(ValueError, match="read-only"):
         layers.load("delta", V1)
 

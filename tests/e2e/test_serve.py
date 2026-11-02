@@ -65,7 +65,7 @@ def journey(request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFac
     subprocess.run([*cli, "init", "--db", db], check=True)
     load = [*cli, "load", str(FIXTURES / "points_10k.parquet"), "--layer", "pop", "--spec", str(FIXTURES / "spec_pop.json")]
     subprocess.run([*load, "--db", db], check=True)
-    if request.param == "postgres":  # a layer with two snapshots, for the time slider
+    if request.param.startswith("postgres"):  # a layer with two snapshots, for the time slider
         spec = tmp / "spec_ts.json"
         spec.write_text(json.dumps({**json.loads((FIXTURES / "spec_pop.json").read_text()), "snapshots": True}))
         for path, day in (("points_10k.parquet", "2026-10-01"), ("points_10k_v2.parquet", "2026-11-01")):
@@ -152,8 +152,6 @@ def test_legend_shows_breakpoints(page: Page) -> None:
 
 
 def test_time_slider_changes_features(journey: Journey, page: Page) -> None:
-    if journey.backend != "postgres":
-        pytest.skip("snapshots need PostgreSQL")
     rendered = "JSON.stringify(window.map.queryRenderedFeatures({layers: ['cells']}).map((f) => f.properties))"
     page.select_option("#layer", label="ts")
     page.wait_for_function("window.current.name === 'ts' && window.map.loaded() && window.map.areTilesLoaded()")
@@ -165,7 +163,7 @@ def test_time_slider_changes_features(journey: Journey, page: Page) -> None:
     assert page.inner_text("#snapshot-label") == "2026-10-01"
     page.wait_for_function(f"(latest) => {rendered} !== latest", arg=latest)  # times out if nothing changes
     ARTIFACTS.mkdir(parents=True, exist_ok=True)
-    page.screenshot(path=ARTIFACTS / "viewer-snapshot.png")
+    page.screenshot(path=ARTIFACTS / f"viewer-snapshot-{journey.backend}.png")
 
 
 def test_upsert_shows_immediately(journey: Journey, tmp_path: Path) -> None:

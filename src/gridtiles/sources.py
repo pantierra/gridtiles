@@ -68,6 +68,9 @@ class Records:
         self.read = self.loaded = 0
         self._srid, self._batches, self._columns = srid, batches, columns
 
+    def report(self, cells_written: int) -> LoadReport:
+        return LoadReport(self.read, self.loaded, self.read - self.loaded, cells_written)
+
     def __iter__(self) -> Iterator[Record]:
         for batch in self._batches:
             values = [pc.cast(batch.column(c), pa.float64()).to_pylist() for c in self._columns]

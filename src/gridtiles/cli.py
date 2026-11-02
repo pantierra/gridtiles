@@ -95,12 +95,16 @@ def load(
     """Load points, polygons or a raster into a layer and roll it up."""
     if append and replace_cells:
         _fail("Use either --append or --replace-cells.")
+    if snapshot and (append or replace_cells):
+        _fail("Snapshots are loaded, not upserted: drop --append / --replace-cells.")
     settings = _settings(config)
     with _backend(db_url, settings) as backend:
         try:
             backend.list_layers([layer])
+            created = False
         except LookupError:
             backend.create_layer(_layer_spec(layer, spec, settings))
+            created = True
         max_cells = None if force else MAX_CELLS_PER_FEATURE
         try:
             if append or replace_cells:
@@ -109,10 +113,10 @@ def load(
             else:
                 day = date.fromisoformat(snapshot) if snapshot else None
                 report = backend.load(layer, src, max_cells_per_feature=max_cells, snapshot=day)
-        except CellLimitExceeded as e:
-            _fail(f"{e} (use --force)")
-        except (MissingCapability, ValueError) as e:  # ValueError: UnsupportedGeometry, raster CRS or pixel size, source columns
-            _fail(str(e))
+        except (CellLimitExceeded, MissingCapability, ValueError) as e:  # ValueError: UnsupportedGeometry, raster
+            if created:  # leave no empty layer behind
+                backend.drop_layer(layer)
+            _fail(f"{e} (use --force)" if isinstance(e, CellLimitExceeded) else str(e))
         typer.echo(report)
 
 

@@ -8,10 +8,10 @@ from collections.abc import Iterable, Iterator
 from datetime import date
 from importlib.resources import files
 from typing import Any, Self
-from urllib.parse import quote
 
 import psycopg
 from psycopg import errors, sql
+from psycopg.conninfo import make_conninfo
 from psycopg.types.json import Jsonb
 
 from gridtiles import query as region_stats
@@ -54,12 +54,12 @@ class PostgresBackend:
         """Open a URL (autocommit; each tile thread gets its own connection) or wrap a connection
         (its transaction is used; tiles share it)."""
         if isinstance(target, str):
-            self.conn, self._own = psycopg.connect(target, autocommit=True), True
+            self.conn, self._own, self.url = psycopg.connect(target, autocommit=True), True, target
         else:
             self.conn, self._own = target, False
-        info = self.conn.info
-        self.url = f"postgresql://{quote(info.user)}:{quote(info.password)}@{info.host}:{info.port}/{quote(info.dbname)}"
+            self.url = make_conninfo(target.info.dsn, password=target.info.password)
         self._local = threading.local()
+        self._shared = threading.Lock()
         self._tile_conns: list[psycopg.Connection] = []
 
     def __enter__(self) -> Self:
@@ -136,7 +136,7 @@ class PostgresBackend:
                 cells = self._ingest(layer, records, source_columns(spec), max_cells_per_feature, snapshot=snapshot)
             if rollup:
                 self.conn.execute("select gridtiles.rollup(%s, %s)", (layer, snapshot))
-        return LoadReport(records.read, records.loaded, records.read - records.loaded, cells)
+        return records.report(cells)
 
     def upsert(
         self,
@@ -166,7 +166,7 @@ class PostgresBackend:
             if refresh_stats:
                 self.conn.execute("select gridtiles.refresh_stats(%s)", (layer,))
         assert row is not None
-        return LoadReport(records.read, records.loaded, records.read - records.loaded, int(row[0]))
+        return records.report(int(row[0]))
 
     def _ingest(
         self,
@@ -207,8 +207,17 @@ class PostgresBackend:
         self.conn.execute("select gridtiles.rollup(%s)", (layer,))
 
     def tile(self, layer: str, z: int, x: int, y: int, snapshot: date | None = None) -> bytes:
-        query = "select gridtiles.mvt(%s, %s, %s, %s, %s)"
-        row = self._tile_conn().execute(query, (layer, z, x, y, snapshot)).fetchone()
+        query, params = "select gridtiles.mvt(%s, %s, %s, %s, %s)", (layer, z, x, y, snapshot)
+        try:
+            if self._own:
+                row = self._tile_conn().execute(query, params).fetchone()
+            else:  # a shared connection: one tile at a time, in a savepoint that a failure rolls back
+                with self._shared, self.conn.transaction():
+                    row = self.conn.execute(query, params).fetchone()
+        except errors.NoDataFound as e:
+            raise LookupError(f"layer {layer!r} does not exist") from e
+        except errors.NumericValueOutOfRange as e:
+            raise ValueError(str(e.diag.message_primary)) from e
         assert row is not None
         return bytes(row[0])
 

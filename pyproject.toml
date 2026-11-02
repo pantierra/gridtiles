@@ -68,7 +68,7 @@ markers = ["e2e: needs the compose services, including Martin", "perf: nightly p
 root_package = "gridtiles"
 
 [[tool.importlinter.contracts]]
-name = "The CLI and exporter use only the backend interface"
+name = "The CLI, exporter, server and API use only the backend interface"
 type = "forbidden"
 source_modules = ["gridtiles.api", "gridtiles.cli", "gridtiles.export", "gridtiles.server"]
 forbidden_modules = ["gridtiles.backends.postgres"]

@@ -150,7 +150,7 @@ $$;
 create or replace function gridtiles._check_writable(l gridtiles.layers) returns void
 language plpgsql immutable as $$
 begin
-    if l.spec ? 'diff' then
+    if jsonb_typeof(l.spec->'diff') = 'array' then
         raise exception 'layer % is a read-only diff', l.name using errcode = '0A000';
     end if;
 end $$;
