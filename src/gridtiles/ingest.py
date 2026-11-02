@@ -20,7 +20,7 @@ import pyarrow.parquet as pq
 import pyogrio
 from psycopg import sql
 
-from gridtiles.spec import LayerSpec
+from gridtiles.db import layer_spec
 
 BATCH_SIZE = 100_000
 STAGING = "_gridtiles_staging"
@@ -39,13 +39,6 @@ class LoadReport:
     records_loaded: int
     skipped_null_geometry: int
     cells_written: int
-
-
-def layer_spec(conn: psycopg.Connection, layer: str) -> LayerSpec:
-    row = conn.execute("select spec from gridtiles.layers where name = %s", (layer,)).fetchone()
-    if row is None:
-        raise LookupError(f"layer {layer!r} does not exist")
-    return LayerSpec.model_validate(row[0])
 
 
 def load_points(

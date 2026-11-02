@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>gridtiles</title>
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <style>
+    html, body, #map { margin: 0; height: 100%; }
+    #panel { position: absolute; top: 10px; left: 10px; padding: 8px 10px; background: #fffe;
+             border-radius: 4px; box-shadow: 0 1px 4px #0003; font: 12px/1.5 system-ui, sans-serif; }
+    #panel select { margin-bottom: 6px; }
+    .class span { display: inline-block; width: 14px; height: 10px; margin-right: 6px; opacity: 0.7; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div id="panel"><select id="layer" hidden></select><div id="title"></div><div id="legend"></div></div>
+  <script>
+    // Sequential palette (ColorBrewer YlGnBu), one colour per class.
+    const PALETTE = ["#ffffd9", "#edf8b1", "#c7e9b4", "#7fcdbb", "#41b6c4", "#1d91c0", "#225ea8", "#0c2c84"];
+    const map = (window.map = new maplibregl.Map({
+      container: "map",
+      style: { version: 8, sources: {}, layers: [{ id: "background", type: "background", paint: { "background-color": "#f4f4f2" } }] },
+      center: [0, 0],
+      zoom: 1,
+    }));
+    const popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
+    const fmt = (v) => (typeof v === "number" ? v.toLocaleString(undefined, { maximumSignificantDigits: 4 }) : v);
+
+    function source(layer) {
+      if (layer.tiles.endsWith(".pmtiles")) return { type: "vector", url: "pmtiles://" + new URL(layer.tiles, location.href) };
+      return { type: "vector", tiles: [layer.tiles], minzoom: layer.minzoom, maxzoom: layer.maxzoom };
+    }
+
+    function show(layer) {
+      for (const id of ["cells", "outlines"]) if (map.getLayer(id)) map.removeLayer(id);
+      if (map.getSource("cells")) map.removeSource("cells");
+      // Style the first value; count values live in the tile property `n`. The breakpoints come from
+      // the base zoom, so additive values are compared per base cell: value / 4^(base_zoom - z).
+      const value = layer.values[0];
+      const additive = value.agg === "sum" || value.agg === "count";
+      const get = ["get", value.agg === "count" ? "n" : value.name];
+      const input = additive ? ["/", get, ["^", 4, ["-", layer.base_zoom, ["get", "z"]]]] : get;
+      const breaks = layer.stats?.[value.name]?.breaks ?? [];
+      const step = ["step", input, PALETTE[0]];
+      let last = -Infinity; // step stops must increase strictly; equal breakpoints merge classes
+      breaks.forEach((b, i) => { if (b > last) step.push((last = b), PALETTE[i + 1]); });
+
+      map.addSource("cells", source(layer));
+      map.addLayer({ id: "cells", type: "fill", source: "cells", "source-layer": "cells",
+                     paint: { "fill-color": step.length > 3 ? step : PALETTE[4], "fill-opacity": 0.7 } });
+      map.addLayer({ id: "outlines", type: "line", source: "cells", "source-layer": "cells",
+                     minzoom: Math.max(0, layer.base_zoom - 2), paint: { "line-color": "#0003", "line-width": 0.5 } });
+
+      const unit = value.unit ? ` ${value.unit}` : "";
+      const per = additive ? ` per z${layer.base_zoom} cell` : "";
+      document.getElementById("title").textContent = `${layer.name}: ${value.name}${unit}${per}`;
+      const edges = [null, ...breaks, null];
+      document.getElementById("legend").innerHTML = PALETTE.map((colour, i) => {
+        const [lo, hi] = [edges[i], edges[i + 1]];
+        const label = lo === null ? `< ${fmt(hi)}` : hi === null ? `≥ ${fmt(lo)}` : `${fmt(lo)} – ${fmt(hi)}`;
+        return `<div class="class"><span style="background:${colour}"></span>${label}</div>`;
+      }).join("");
+      if (layer.bounds) map.fitBounds(layer.bounds, { padding: 20, animate: false });
+      window.current = layer;
+    }
+
+    map.on("mousemove", "cells", (e) => {
+      const p = e.features[0].properties;
+      const layer = window.current;
+      const rows = [["qk", p.qk], ["z", p.z], ["n", fmt(p.n)]].concat(
+        layer.values.filter((v) => v.agg !== "count").map((v) => [v.name, fmt(p[v.name]) + (v.unit ? ` ${v.unit}` : "")]));
+      popup.setLngLat(e.lngLat).setHTML(rows.map(([k, v]) => `<div><b>${k}</b> ${v}</div>`).join("")).addTo(map);
+      map.getCanvas().style.cursor = "pointer";
+    });
+    map.on("mouseleave", "cells", () => { popup.remove(); map.getCanvas().style.cursor = ""; });
+
+    Promise.all([fetch("config.json").then((r) => r.json()), new Promise((r) => map.once("load", r))]).then(([config]) => {
+      const select = document.getElementById("layer");
+      if (config.layers.length > 1) {
+        select.hidden = false;
+        select.innerHTML = config.layers.map((l, i) => `<option value="${i}">${l.name}</option>`).join("");
+        select.onchange = () => show(config.layers[select.value]);
+      }
+      show(config.layers[0]);
+    });
+  </script>
+</body>
+</html>

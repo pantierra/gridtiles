@@ -13,7 +13,7 @@
         },
         {
           "type": "generic",
-          "path": "sql/001_schema.sql"
+          "path": "src/gridtiles/sql/001_schema.sql"
         }
       ],
       "changelog-sections": [
