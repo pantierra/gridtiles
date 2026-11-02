@@ -64,3 +64,13 @@ create temp table staging (geom geometry, pop double precision, osm_ratio double
 insert into staging values ('SRID=4326;POINT(13.405 52.52)', 10, 0.5, 100);
 select gridtiles.ingest_points('pop', 'staging');  -- 1
 ```
+
+## Rollup
+
+`rollup(name)` rebuilds every level from `base_zoom - 1` down to `min_zoom` from its children (`qk >> 2`), merging each stored column per its aggregator, then writes `layers.stats`: per value the `total`, `min`, `max` and 7 quantile `breaks` (1/8 … 7/8) of the tile property at the base zoom. Sums run in quadkey order, so a rebuild is reproducible bit for bit.
+
+```sql
+select gridtiles.rollup('pop');
+select z, count(*), sum(n) from gridtiles.cells_pop group by z order by z;
+select stats->'population' from gridtiles.layers where name = 'pop';
+```

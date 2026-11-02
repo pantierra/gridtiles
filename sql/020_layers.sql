@@ -64,6 +64,27 @@ language sql immutable strict parallel safe as $$
     from gridtiles._columns(spec) c
 $$;
 
+-- Comma-led aggregates combining child cells into their parent (one merge per stored column).
+-- Sums run in quadkey order so float results are reproducible bit for bit.
+create or replace function gridtiles._merge_aggregates(spec jsonb) returns text
+language sql immutable strict parallel safe as $$
+    select coalesce(string_agg(format(', %s(%I%s)', merge, col, case merge when 'sum' then ' order by qk' else '' end),
+        '' order by i), '')
+    from gridtiles._columns(spec) c
+$$;
+
+-- The tile property of each value as an SQL expression over a cell row.
+create or replace function gridtiles._properties(spec jsonb) returns table (value text, expr text)
+language sql immutable strict parallel safe as $$
+    select v->>'name', case v->>'agg'
+        when 'count' then 'n'
+        when 'mean' then format('%I / nullif(%I, 0)', v->>'name' || '_sum', v->>'name' || '_w')
+        else quote_ident(v->>'name' || '_' || (v->>'agg'))
+    end
+    from jsonb_array_elements(spec->'values') with ordinality as e(v, i)
+    order by e.i
+$$;
+
 create or replace function gridtiles._check_spec(spec jsonb) returns void
 language plpgsql immutable parallel safe as $$
 declare

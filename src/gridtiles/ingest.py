@@ -56,11 +56,13 @@ def load_points(
     lon: str | None = None,
     lat: str | None = None,
     crs: str = "EPSG:4326",
+    rollup: bool = True,
 ) -> LoadReport:
     """Aggregate a point file into the layer's base cells.
 
     Reads CSV (`lon` / `lat` columns), GeoParquet, GeoJSON, Shapefile or anything else GDAL reads.
-    `crs` applies when the source does not declare one. Repeated loads add up.
+    `crs` applies when the source does not declare one. Repeated loads add up. With `rollup`, the
+    coarser levels and the layer stats are rebuilt afterwards.
     """
     spec = layer_spec(conn, layer)
     sources = list(dict.fromkeys(s for v in spec.values if v.agg != "count" for s in (v.from_, v.weight) if s))
@@ -85,6 +87,8 @@ def load_points(
                 read += batch.num_rows
         row = conn.execute("select gridtiles.ingest_points(%s, %s::regclass)", (layer, STAGING)).fetchone()
         conn.execute(sql.SQL("drop table {}").format(sql.Identifier(STAGING)))
+        if rollup:
+            conn.execute("select gridtiles.rollup(%s)", (layer,))
     assert row is not None
     return LoadReport(read, loaded, read - loaded, row[0])
 
