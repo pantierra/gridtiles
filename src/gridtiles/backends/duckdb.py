@@ -128,13 +128,13 @@ class DuckDBBackend:
         self.conn.execute(f"drop table gridtiles.cells_{name}")
 
     def spec(self, name: str, conn: duckdb.DuckDBPyConnection | None = None) -> LayerSpec:
-        rows = (conn or self.conn).execute("select spec from gridtiles.layers where name = ?", [name]).fetchall()
+        rows = (conn or self._cursor()).execute("select spec from gridtiles.layers where name = ?", [name]).fetchall()
         if not rows:
             raise LookupError(f"layer {name!r} does not exist")
         return LayerSpec.model_validate_json(rows[0][0])
 
     def list_layers(self, names: list[str] | None = None) -> list[Layer]:
-        rows = self.conn.execute("select spec, stats, cells, bounds from gridtiles.layers order by name").fetchall()
+        rows = self._cursor().execute("select spec, stats, cells, bounds from gridtiles.layers order by name").fetchall()
         found = [
             Layer(LayerSpec.model_validate_json(spec), json.loads(stats) if stats else None, cells, tuple(b) if b else None)
             for spec, stats, cells, b in rows
@@ -173,7 +173,7 @@ class DuckDBBackend:
         except BaseException:
             self.conn.rollback()
             raise
-        return LoadReport(records.read, records.loaded, records.read - records.loaded, cells)
+        return records.report(cells)
 
     def _ingest(
         self, spec: LayerSpec, records: Records, columns: list[str], max_cells: int | None, target: str | None = None
@@ -324,7 +324,7 @@ class DuckDBBackend:
         except BaseException:
             self.conn.rollback()
             raise
-        return LoadReport(records.read, records.loaded, records.read - records.loaded, written)
+        return records.report(written)
 
     def tile(self, layer: str, z: int, x: int, y: int, snapshot: date | None = None) -> bytes:
         """Cells at c(t) in the tile's key range, encoded in Python; mirrors `gridtiles.mvt`."""

@@ -176,3 +176,23 @@ def test_export(backend: Backend, tmp_path: Path) -> None:
     for z, x, y in tiles[::10]:
         assert gzip.decompress(reader.get(z, x, y)) == backend.tile("pop", z, x, y)
     assert reader.metadata()["gridtiles"]["spec"] == SPEC.model_dump(mode="json", exclude_none=True)
+
+
+def test_tile_errors(backend: Backend) -> None:
+    with pytest.raises(LookupError):
+        backend.tile("missing", 0, 0, 0)
+    backend.create_layer(SPEC)
+    with pytest.raises(ValueError):
+        backend.tile("pop", 31, 0, 0)
+
+
+def test_exports_share_a_folder(backend: Backend, tmp_path: Path) -> None:
+    for name in ("pop", "other"):
+        backend.create_layer(SPEC.model_copy(update={"name": name}))
+        backend.load(name, FIXTURES / "points_small.csv")
+        export_pmtiles(backend, name, tmp_path / f"{name}.pmtiles")
+    config = json.loads((tmp_path / "config.json").read_text())
+    assert [(layer["name"], layer["tiles"]) for layer in config["layers"]] == [
+        ("other", "other.pmtiles"),
+        ("pop", "pop.pmtiles"),
+    ]

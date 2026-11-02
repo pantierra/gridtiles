@@ -35,7 +35,7 @@ gridtiles serve --db cells.duckdb   # embedded: viewer and tiles on http://local
 
 `export` writes every tile with data in the published zoom range (gzip-compressed MVT) to one archive whose metadata holds the layer manifest (`gridtiles`: version, spec, stats, bounds). Upload the folder to any static host that answers HTTP range requests (S3, R2, GitHub Pages; Python's `http.server` does not). Exports of the same data are byte-identical.
 
-`serve` runs live on backends that support it (PostgreSQL): it writes `build/martin.yaml` (one function source `tile_<name>` per layer, serving the published tile zooms) and `build/viewer/`, then runs a local `martin` binary, or the pinned Martin Docker image on the host network when there is none. `--embedded` (the default for DuckDB) serves tiles from the gridtiles process itself at `/tiles/<layer>/<z>/<x>/<y>`, next to the viewer. `serve --live` on a backend without the `live` capability exits with status 2. `--port`, `--martin-port` and `--build` change the defaults.
+`serve` runs live on backends that support it (PostgreSQL): it writes `build/martin.yaml` (one function source `tile_<name>` per layer, serving the published tile zooms, plus `tile_<name>_at` reading `?snapshot=` on snapshot layers) and `build/viewer/`, then runs a local `martin` binary, or the pinned Martin Docker image on the host network when there is none. `--embedded` (the default for DuckDB) serves tiles from the gridtiles process itself at `/tiles/<layer>/<z>/<x>/<y>`, next to the viewer. `serve --live` on a backend without the `live` capability exits with status 2. `--port`, `--martin-port` and `--build` change the defaults.
 
 ## gridtiles.toml
 

@@ -32,22 +32,22 @@ spec = LayerSpec.model_validate(
     }
 )
 spec.detail  # 4
-spec.model_dump_json()  # JSON accepted by gridtiles.create_layer
+spec.model_dump_json(exclude_none=True)  # JSON accepted by gridtiles.create_layer
 ```
 
 ## Backends
 
-Every store implements the `Backend` protocol (`gridtiles.backends.base`); the CLI and exporter use nothing else. `open_backend(url)` opens PostgreSQL for a `postgresql://` URL (or a libpq `key=value` string) and DuckDB for a file path; pass `kind="postgres"` or `"duckdb"` to choose explicitly.
+Every store implements the `Backend` protocol (`gridtiles.backends.base`); the CLI, exporter, embedded server and API use nothing else. `open_backend(url)` opens PostgreSQL for a `postgresql://` URL (or a libpq `key=value` string) and DuckDB for a file path; pass `kind="postgres"` or `"duckdb"` to choose explicitly.
 
 | Operation | Does |
 | --- | --- |
 | `install()` | Create or upgrade the schema; returns its version |
 | `create_layer(spec)`, `drop_layer(name)` | Register or remove a layer (`LayerExists` if taken) |
 | `list_layers(names=None)` | `Layer`s with spec, stats, cell count and bounds; `LookupError` for unknown names |
-| `load(layer, path, *, kind=None, lon=None, lat=None, crs="EPSG:4326", band=1, rollup=True, max_cells_per_feature=1_000_000)` | Aggregate points, polygons or a raster into base cells, then roll up; returns a `LoadReport` |
+| `load(layer, path, *, kind=None, lon=None, lat=None, crs="EPSG:4326", band=1, rollup=True, max_cells_per_feature=1_000_000, snapshot=None)` | Aggregate points, polygons or a raster into base cells (of `snapshot` on snapshot layers), then roll up; returns a `LoadReport` |
 | `upsert(layer, path, *, mode="add", refresh_stats=False, ...)` | Apply a batch incrementally: `add` merges, `replace` overwrites the touched base cells; the result equals a full rollup. Stats, cell count and bounds only with `refresh_stats` |
 | `rollup(layer)` | Rebuild the coarser levels, stats and bounds |
-| `tile(layer, z, x, y)` | One MVT (`b""` if empty); thread-safe |
+| `tile(layer, z, x, y, snapshot=None)` | One MVT (`b""` if empty) of `snapshot` or the latest; thread-safe |
 | `tiles_with_data(layer)` | `(z, x, y)` of every tile with data in the published zoom range |
 | `query(layer, *, prefix=None, bbox=None, polygon=None, zoom=None, snapshot=None)` | Stats of the cells in a region (see [api.md](api.md)) |
 | `diff(a, b, name)` | Create the read-only layer `name` = B − A of two `"layer[@YYYY-MM-DD]"` references |

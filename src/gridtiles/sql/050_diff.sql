@@ -30,7 +30,8 @@ begin
 
     select string_agg(format(', %I', c.col), '' order by c.i),
            string_agg(', ' || case
-               when c.part = 'weight' then '1'
+               -- weight 1 where the mean's difference exists, so merging diff cells averages them
+               when c.part = 'weight' then format('case when b.%1$I > 0 and a.%1$I > 0 then 1 end', c.col)
                when c.agg = 'sum' then format('coalesce(b.%1$I, 0) - coalesce(a.%1$I, 0)', c.col)
                when c.agg = 'mean' then format('b.%1$I / nullif(b.%2$I, 0) - a.%1$I / nullif(a.%2$I, 0)',
                                                c.col, c.value || '_w')
