@@ -8,6 +8,7 @@ Every command takes `--db URL` and `--config FILE`. Settings precedence: flags, 
 | `gridtiles load SRC --layer NAME [--spec FILE] [--force]` | Create the layer if absent (from `--spec` or `gridtiles.toml`), load points, polygons or a raster, roll up |
 | `gridtiles layers` | List layers with zooms, published tile zooms and cell counts |
 | `gridtiles serve [--layer NAME ...]` | Serve live tiles with Martin and the viewer until interrupted |
+| `gridtiles export --layer NAME -o FILE.pmtiles` | Write a PMTiles archive plus `index.html` and `config.json` next to it |
 
 An invalid or unreadable spec, a missing layer spec, a missing database, an unsupported geometry or a polygon spanning more than 1,000,000 base cells (without `--force`) exits with status 2, as does `serve` when Martin exits on its own (e.g. on a bad database URL or a busy port).
 
@@ -17,7 +18,10 @@ gridtiles init
 gridtiles load tests/fixtures/points_10k.parquet --layer pop --spec tests/fixtures/spec_pop.json
 gridtiles layers   # pop  z2-16  detail 4  tiles z0-12  ... cells
 gridtiles serve    # viewer on http://localhost:8080, tiles on http://localhost:3000
+gridtiles export --layer pop -o site/pop.pmtiles
 ```
+
+`export` writes every tile with data in the published zoom range (gzip-compressed MVT) to one archive whose metadata holds the layer manifest (`gridtiles`: version, spec, stats, bounds). Upload the folder to any static host that answers HTTP range requests (S3, R2, GitHub Pages; Python's `http.server` does not). Exports of the same data are byte-identical.
 
 `serve` writes `build/martin.yaml` (one function source `tile_<name>` per layer, serving the published tile zooms) and `build/viewer/`, then runs a local `martin` binary, or the pinned Martin Docker image on the host network when there is none. `--port`, `--martin-port` and `--build` change the defaults.
 
