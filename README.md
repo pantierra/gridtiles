@@ -43,7 +43,7 @@ make down
 | Command | Does |
 | --- | --- |
 | `make up` / `make down` | Start / stop the compose services, waiting until healthy |
-| `make db-reset` | Recreate the `gridtiles_test` database and apply `sql/*.sql` |
+| `make db-reset` | Recreate the `gridtiles_test` database and install the schema (`gridtiles init`) |
 | `make test` | Unit and SQL tests |
 | `make e2e` | End-to-end tests against the running services |
 | `make check` | ruff, mypy and all tests, including end-to-end |
