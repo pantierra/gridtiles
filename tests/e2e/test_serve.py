@@ -80,7 +80,6 @@ def page(journey: str) -> Iterator[Page]:
         page = browser.new_page(viewport={"width": 1024, "height": 768})
         page.goto(f"http://localhost:{VIEWER_PORT}/")
         page.wait_for_function("window.map && window.current && window.map.loaded() && window.map.areTilesLoaded()")
-        page.evaluate("new Promise((resolve) => window.map.once('idle', resolve))")
         yield page
         browser.close()
 
