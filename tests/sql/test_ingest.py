@@ -146,8 +146,9 @@ def test_native_geoparquet_encoding_raises(db: psycopg.Connection, tmp_path: Pat
         load_points(db, "pop", path)
 
 
-def test_reserved_source_column_raises(db: psycopg.Connection) -> None:
-    create(db, {**SPEC, "name": "reserved", "values": [{"name": "g", "from": "geom", "agg": "sum"}]})
+@pytest.mark.parametrize("column", ["geom", "_cell", "_anything"])
+def test_reserved_source_column_raises(db: psycopg.Connection, column: str) -> None:
+    create(db, {**SPEC, "name": "reserved", "values": [{"name": "g", "from": column, "agg": "sum"}]})
     with pytest.raises(ValueError, match="reserved"):
         load_points(db, "reserved", FIXTURES / "points_small.csv")
 

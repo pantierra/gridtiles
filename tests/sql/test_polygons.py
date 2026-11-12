@@ -68,6 +68,18 @@ def test_polygon_reaching_the_pole_loads(db: psycopg.Connection, tmp_path: Path)
     assert sum(pop for _, pop in cell_rows(db, "poly", 10).values()) == pytest.approx(400)
 
 
+def test_source_columns_named_like_sql_helpers_load(db: psycopg.Connection, tmp_path: Path) -> None:
+    path = tmp_path / "gv.gpkg"
+    write_vector(
+        path, {"g": [1.0], "v": [400.0]}, [polygon_wkb([(13.40, 52.51), (13.41, 52.51), (13.41, 52.52), (13.40, 52.52)])]
+    )
+    values = [{"name": "pop", "from": "v", "agg": "sum"}, {"name": "ratio", "from": "v", "agg": "mean", "weight": "g"}]
+    create(db, {**POLY_SPEC, "values": values})
+    load_polygons(db, "poly", path)
+    (total,) = db.execute("select sum(pop_sum) from gridtiles.cells_poly where z = 16").fetchone()
+    assert total == pytest.approx(400)
+
+
 def test_polygon_over_four_cells(db: psycopg.Connection, tmp_path: Path) -> None:
     qk = quadkey.from_lonlat(13.405, 52.52, 15)
     create(db, POLY_SPEC)

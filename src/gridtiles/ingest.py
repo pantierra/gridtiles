@@ -30,7 +30,7 @@ from gridtiles.quadkey import WORLD
 
 BATCH_SIZE = 100_000
 STAGING = "_gridtiles_staging"
-RESERVED = {"geom", "_cell", "_g", "_share", "_area", "_a"}  # staging and ingest column names a source must not reuse
+RESERVED = {"geom"}  # the staging geometry; names starting with "_" are reserved for ingest columns as well
 LON_NAMES = "lon,lng,longitude,x"
 LAT_NAMES = "lat,latitude,y"
 RASTER_SUFFIXES = (".tif", ".tiff", ".vrt", ".jp2", ".nc")
@@ -159,8 +159,8 @@ def _sources(conn: psycopg.Connection, layer: str) -> list[str]:
     """Source columns a layer's values read: each value's `from` and `weight`."""
     spec = layer_spec(conn, layer)
     sources = list(dict.fromkeys(s for v in spec.values if v.agg != "count" for s in (v.from_, v.weight) if s))
-    if clash := RESERVED.intersection(sources):
-        raise ValueError(f"source columns {sorted(clash)} clash with reserved names {sorted(RESERVED)}")
+    if clash := [s for s in sources if s in RESERVED or s.startswith("_")]:
+        raise ValueError(f"source columns {clash} are reserved: {sorted(RESERVED)} and names starting with '_'")
     return sources
 
 
@@ -221,7 +221,10 @@ def _ingest(conn: psycopg.Connection, layer: str, kind: Kind, max_cells: int | N
         else:
             row = conn.execute("select gridtiles.ingest_points(%s, %s::regclass)", (layer, STAGING)).fetchone()
     except errors.ProgramLimitExceeded as e:
-        raise CellLimitExceeded(str(e.diag.message_primary)) from e
+        message = str(e.diag.message_primary)
+        if "max_cells_per_feature" not in message:  # another limit, e.g. an index row too large
+            raise
+        raise CellLimitExceeded(message) from e
     conn.execute(sql.SQL("drop table {}").format(sql.Identifier(STAGING)))
     if rollup:
         conn.execute("select gridtiles.rollup(%s)", (layer,))

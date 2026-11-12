@@ -45,43 +45,54 @@ $$;
 -- weigh by covered area, min/max apply to every touched cell, and n counts touching polygons.
 -- A polygon whose bounding box spans more than max_cells base cells raises SQLSTATE 54000
 -- (NULL: no limit).
+-- A polygon in EPSG:3857, ready to split: ST_MakeValid repairs self-intersections (which
+-- ST_Intersection would reject), keeping the polygonal part; WGS84 input is clipped to the Mercator
+-- latitudes before projecting, since the poles have no Mercator coordinates; the result is clipped
+-- to the Web Mercator square, so a polygon's whole value lands on cells that exist.
+create or replace function gridtiles._mercator_polygon(geom geometry) returns geometry
+language sql immutable strict parallel safe as $$
+    select ST_Intersection(
+        ST_Transform(case when ST_SRID(valid) = 4326
+                          then ST_Intersection(valid, ST_MakeEnvelope(-180, -85.06, 180, 85.06, 4326))
+                          else valid end, 3857),
+        ST_MakeEnvelope(-20037508.342789244, -20037508.342789244, 20037508.342789244, 20037508.342789244, 3857))
+    from (select ST_CollectionExtract(ST_MakeValid(geom), 3) as valid) v
+$$;
+
 create or replace function gridtiles.ingest_polygons(name text, staging regclass, max_cells bigint default 1000000)
 returns bigint
 language plpgsql as $$
 declare
     l gridtiles.layers;
     widest bigint;
-    polygons text;
+    written bigint;
 begin
     select * into strict l from gridtiles.layers where layers.name = ingest_polygons.name;
-    -- ST_MakeValid repairs self-intersections, which ST_Intersection would reject; keep the polygonal
-    -- part. Clipping to the Web Mercator square keeps a polygon's whole value on the cells that exist;
-    -- WGS84 polygons are clipped before projecting, since the poles have no Mercator coordinates.
-    polygons := format(
-        'select *, ST_Intersection(ST_Transform(v, 3857),
-                                   ST_MakeEnvelope(-20037508.342789244, -20037508.342789244,
-                                                   20037508.342789244, 20037508.342789244, 3857)) as _g
-         from (select *, case when ST_SRID(geom) = 4326
-                              then ST_Intersection(g, ST_MakeEnvelope(-180, -85.06, 180, 85.06, 4326)) else g end as v
-               from (select *, ST_CollectionExtract(ST_MakeValid(geom), 3) as g from %s
-                     where not coalesce(ST_IsEmpty(geom), true)) valid) wgs84',
+    -- Projected once: both the cell limit check and the split read it.
+    drop table if exists _gridtiles_polygons;
+    execute format(
+        'create temp table _gridtiles_polygons as
+         select *, gridtiles._mercator_polygon(geom) as _g from %s where not coalesce(ST_IsEmpty(geom), true)',
         staging);
     if max_cells is not null then
         execute format(
-            'select max((r.x1 - r.x0 + 1)::bigint * (r.y1 - r.y0 + 1)) from (%s) p, gridtiles._bbox_tile_range(p._g, %s) r',
-            polygons, l.zb
+            'select max((r.x1 - r.x0 + 1)::bigint * (r.y1 - r.y0 + 1))
+             from _gridtiles_polygons p, gridtiles._bbox_tile_range(p._g, %s) r', l.zb
         ) into widest;
         if widest > max_cells then
             raise exception 'a polygon spans % cells at z%, above max_cells_per_feature %', widest, l.zb, max_cells
                 using errcode = '54000';
         end if;
     end if;
-    return gridtiles._insert_cells(l,
+    written := gridtiles._insert_cells(l,
         format(
             'select p.*, gridtiles._qk(t.x, u.y) as _cell, a._a / ST_Area(p._g) as _share, a._a as _area
-             from (%s) p, gridtiles._bbox_tile_range(p._g, %s) r, generate_series(r.x0, r.x1) t(x), generate_series(r.y0, r.y1) u(y),
+             from _gridtiles_polygons p, gridtiles._bbox_tile_range(p._g, %s) r,
+                 generate_series(r.x0, r.x1) t(x), generate_series(r.y0, r.y1) u(y),
                  lateral (select ST_Area(ST_Intersection(p._g, ST_TileEnvelope(%s, t.x, u.y))) as _a) a
              where a._a > 0',
-            polygons, l.zb, l.zb),
+            l.zb, l.zb),
         gridtiles._aggregates(l.spec, '_share', '_area'));
+    drop table _gridtiles_polygons;
+    return written;
 end $$;

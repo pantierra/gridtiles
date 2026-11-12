@@ -45,7 +45,7 @@ spec.model_dump_json()  # JSON accepted by gridtiles.create_layer
 | `load_polygons(conn, layer, path, *, crs="EPSG:4326", rollup=True, max_cells_per_feature=1_000_000)` | anything GDAL reads, GeoParquet | sums get value × covered fraction; means are weighted by covered area; min/max apply to every touched cell; `n` counts touching polygons |
 | `load_raster(conn, layer, path, *, band=1, rollup=True)` | anything rasterio reads | each valid pixel is a point at its centre with the source column `value` |
 
-`crs` applies when the source declares none. Null and empty geometries count as `skipped_null_geometry`. A geometry other than points and polygons, or a mix of both, raises `UnsupportedGeometry`; a polygon spanning more than `max_cells_per_feature` base cells raises `CellLimitExceeded` (`None`: no limit); pixels larger than half a base cell raise `ValueError` with a suggested base zoom.
+`crs` applies when the source declares none. Null and empty geometries count as `skipped_null_geometry`. A geometry other than points and polygons, or a mix of both, raises `UnsupportedGeometry`; a polygon spanning more than `max_cells_per_feature` base cells raises `CellLimitExceeded` (`None`: no limit); pixels larger than half a base cell raise `ValueError` with a suggested base zoom. `load_raster` holds the whole band in memory, plus Python objects for every valid pixel (several GB for 100 million pixels), so split very large rasters into tiles first.
 
 The load and the rollup run in one transaction, so a failing rollup rolls back the load. Each rollup rebuilds every coarser level, so when loading many files pass `rollup=False` and call the SQL function once at the end: `conn.execute("select gridtiles.rollup(%s)", (layer,))`.
 
