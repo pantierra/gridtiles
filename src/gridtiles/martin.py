@@ -13,7 +13,7 @@ IMAGE = "ghcr.io/maplibre/martin:1.16.0"
 def config(db_url: str, layers: list[Layer], port: int) -> dict[str, Any]:
     """One function source per layer, serving the published tile zoom range."""
     return {
-        "listen_addresses": f"0.0.0.0:{port}",
+        "listen_addresses": f"127.0.0.1:{port}",
         "postgres": {
             "connection_string": db_url,
             "auto_publish": False,

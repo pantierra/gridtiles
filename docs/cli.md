@@ -9,7 +9,7 @@ Every command takes `--db URL` and `--config FILE`. Settings precedence: flags, 
 | `gridtiles layers` | List layers with zooms, published tile zooms and cell counts |
 | `gridtiles serve [--layer NAME ...]` | Serve live tiles with Martin and the viewer until interrupted |
 
-An invalid spec, a missing layer spec or a missing database exits with status 2.
+An invalid or unreadable spec, a missing layer spec or a missing database exits with status 2, as does `serve` when Martin exits on its own (e.g. on a bad database URL or a busy port).
 
 ```bash
 export GRIDTILES_DB=postgresql://postgres:postgres@localhost:5439/postgres
@@ -20,6 +20,8 @@ gridtiles serve    # viewer on http://localhost:8080, tiles on http://localhost:
 ```
 
 `serve` writes `build/martin.yaml` (one function source `tile_<name>` per layer, serving the published tile zooms) and `build/viewer/`, then runs a local `martin` binary, or the pinned Martin Docker image on the host network when there is none. `--port`, `--martin-port` and `--build` change the defaults.
+
+Both servers listen on `127.0.0.1` only. `build/martin.yaml` holds the database URL including its password, so keep `--build` out of version control and shared folders. Docker host networking needs Linux; on macOS or Windows, install a local `martin` binary. The viewer loads MapLibre from unpkg (pinned, with subresource integrity), so it needs internet access.
 
 ## gridtiles.toml
 

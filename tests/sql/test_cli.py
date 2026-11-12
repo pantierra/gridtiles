@@ -64,6 +64,16 @@ def test_invalid_spec_exits_2(url: str, path: Path) -> None:
     assert "Invalid layer spec" in result.output
 
 
+@pytest.mark.parametrize("content", [None, "{not json"], ids=["missing", "malformed"])
+def test_unreadable_spec_exits_2(url: str, tmp_path: Path, content: str | None) -> None:
+    path = tmp_path / "spec.json"
+    if content is not None:
+        path.write_text(content)
+    result = run("load", FIXTURES / "points_small.csv", "--layer", "unread", "--spec", path, "--db", url)
+    assert result.exit_code == 2
+    assert "Cannot read layer spec" in result.output
+
+
 def test_missing_database_exits_2(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.delenv("GRIDTILES_DB", raising=False)
     monkeypatch.chdir(tmp_path)

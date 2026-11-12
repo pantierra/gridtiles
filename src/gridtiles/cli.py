@@ -4,6 +4,7 @@ import json
 import os
 import signal
 import subprocess
+import threading
 import tomllib
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -47,7 +48,10 @@ def _db_url(flag: str | None, settings: dict[str, Any]) -> str:
 def _layer_spec(layer: str, spec_file: Path | None, settings: dict[str, Any]) -> LayerSpec:
     """The spec of a new layer, from a JSON file or from [grid] and [[value]] in gridtiles.toml."""
     if spec_file:
-        data = json.loads(spec_file.read_text())
+        try:
+            data = json.loads(spec_file.read_text())
+        except (OSError, json.JSONDecodeError) as e:
+            _fail(f"Cannot read layer spec {spec_file}: {e}")
     elif "grid" in settings:
         data = {**settings["grid"], "values": settings.get("value", [])}
     else:
@@ -115,13 +119,20 @@ def serve(
 
     signal.signal(signal.SIGTERM, stop)
     tiles = subprocess.Popen(martin.command(config_path))
-    server = ThreadingHTTPServer(("", port), partial(SimpleHTTPRequestHandler, directory=site))
+    server = ThreadingHTTPServer(("127.0.0.1", port), partial(SimpleHTTPRequestHandler, directory=site))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
     typer.echo(f"Viewer on http://localhost:{port}, tiles on http://localhost:{martin_port}")
     try:
-        server.serve_forever()
+        status = tiles.wait()  # returns only if Martin exits on its own, e.g. on a bad URL or a busy port
+        _fail(f"Martin exited with status {status}")
     except KeyboardInterrupt:
         pass
     finally:
+        server.shutdown()
         server.server_close()
-        tiles.terminate()
-        tiles.wait(timeout=10)
+        if tiles.poll() is None:
+            tiles.terminate()
+            try:
+                tiles.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                tiles.kill()
