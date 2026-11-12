@@ -11,7 +11,8 @@ import pytest
 from psycopg.types.json import Jsonb
 
 from gridtiles import quadkey
-from gridtiles.ingest import UnsupportedGeometry, load_points
+from gridtiles.backends.postgres import PostgresBackend
+from gridtiles.sources import UnsupportedGeometry
 
 from ..conftest import FIXTURES
 from ..fixtures.make_fixtures import point_wkb, random_points, write_geoparquet
@@ -41,7 +42,7 @@ def source_points() -> list[tuple[float, float] | None]:
 
 def test_points_small(db: psycopg.Connection) -> None:
     create(db, SPEC)
-    report = load_points(db, "pop", FIXTURES / "points_small.csv")
+    report = PostgresBackend(db).load("pop", FIXTURES / "points_small.csv")
     assert (report.records_read, report.records_loaded, report.skipped_null_geometry, report.cells_written) == (8, 8, 0, 3)
     expected = json.loads((FIXTURES / "points_small.expected.json").read_text())
     rows = db.execute(
@@ -59,7 +60,7 @@ def test_points_small(db: psycopg.Connection) -> None:
 
 def test_points_10k_totals_and_cells(db: psycopg.Connection) -> None:
     create(db, SPEC)
-    report = load_points(db, "pop", FIXTURES / "points_10k.parquet")
+    report = PostgresBackend(db).load("pop", FIXTURES / "points_10k.parquet")
     points = source_points()
     table = pq.read_table(FIXTURES / "points_10k.parquet")
     loaded = [i for i, p in enumerate(points) if p is not None]
@@ -81,9 +82,9 @@ def test_points_10k_totals_and_cells(db: psycopg.Connection) -> None:
 
 def test_loading_twice_adds_up(db: psycopg.Connection) -> None:
     create(db, SPEC_MINMAX)
-    load_points(db, "minmax", FIXTURES / "points_10k.parquet")
+    PostgresBackend(db).load("minmax", FIXTURES / "points_10k.parquet")
     once = cells(db, "minmax")
-    load_points(db, "minmax", FIXTURES / "points_10k.parquet")
+    PostgresBackend(db).load("minmax", FIXTURES / "points_10k.parquet")
     twice = cells(db, "minmax")
     assert once.keys() == twice.keys()
     for key, (n, pop, c_sum, c_w, pmin, pmax) in once.items():
@@ -106,8 +107,8 @@ def test_epsg3857_gives_identical_cells(db: psycopg.Connection, tmp_path: Path) 
 
     create(db, SPEC)
     create(db, {**SPEC, "name": "pop3857"})
-    load_points(db, "pop", FIXTURES / "points_10k.parquet")
-    load_points(db, "pop3857", path)
+    PostgresBackend(db).load("pop", FIXTURES / "points_10k.parquet")
+    PostgresBackend(db).load("pop3857", path)
     expected, actual = cells(db, "pop"), cells(db, "pop3857")
     assert actual.keys() == expected.keys()
     for key, values in expected.items():
@@ -125,7 +126,7 @@ def test_polygon_raises(db: psycopg.Connection, tmp_path: Path) -> None:
     path.write_text(json.dumps({"type": "FeatureCollection", "features": [point, polygon]}))
     create(db, SPEC)
     with pytest.raises(UnsupportedGeometry, match="row 1"):
-        load_points(db, "pop", path)
+        PostgresBackend(db).load("pop", path)
 
 
 def test_plain_parquet_raises(db: psycopg.Connection, tmp_path: Path) -> None:
@@ -133,7 +134,7 @@ def test_plain_parquet_raises(db: psycopg.Connection, tmp_path: Path) -> None:
     pq.write_table(pa.table({"lon": [13.4], "lat": [52.5], "pop": [1], "osm_ratio": [0.5], "area": [1.0]}), path)
     create(db, SPEC)
     with pytest.raises(ValueError, match="not GeoParquet"):
-        load_points(db, "pop", path)
+        PostgresBackend(db).load("pop", path)
 
 
 def test_native_geoparquet_encoding_raises(db: psycopg.Connection, tmp_path: Path) -> None:
@@ -143,14 +144,14 @@ def test_native_geoparquet_encoding_raises(db: psycopg.Connection, tmp_path: Pat
     pq.write_table(table.replace_schema_metadata({"geo": json.dumps(geo)}), path)
     create(db, SPEC)
     with pytest.raises(UnsupportedGeometry, match="encoding"):
-        load_points(db, "pop", path)
+        PostgresBackend(db).load("pop", path)
 
 
 @pytest.mark.parametrize("column", ["geom", "_cell", "_anything"])
 def test_reserved_source_column_raises(db: psycopg.Connection, column: str) -> None:
     create(db, {**SPEC, "name": "reserved", "values": [{"name": "g", "from": column, "agg": "sum"}]})
     with pytest.raises(ValueError, match="reserved"):
-        load_points(db, "reserved", FIXTURES / "points_small.csv")
+        PostgresBackend(db).load("reserved", FIXTURES / "points_small.csv")
 
 
 @pytest.mark.perf
@@ -160,7 +161,7 @@ def test_perf_1m_points(db: psycopg.Connection, tmp_path: Path) -> None:
     write_geoparquet(path, columns, [point_wkb(*p) for p in points if p is not None])
     create(db, SPEC)
     start = time.perf_counter()
-    report = load_points(db, "pop", path)
+    report = PostgresBackend(db).load("pop", path)
     elapsed = time.perf_counter() - start
     print(f"loaded {report.records_loaded} points in {elapsed:.1f} s")
     assert elapsed < 60
@@ -171,7 +172,7 @@ def test_empty_point_is_skipped(db: psycopg.Connection, tmp_path: Path) -> None:
     empty = struct.pack("<BIdd", 1, 1, math.nan, math.nan)
     write_geoparquet(path, {"pop": [1, 2], "osm_ratio": [0.5, 0.5], "area": [1.0, 1.0]}, [point_wkb(13.4, 52.5), empty])
     create(db, SPEC)
-    report = load_points(db, "pop", path)
+    report = PostgresBackend(db).load("pop", path)
     assert (report.records_read, report.records_loaded, report.skipped_null_geometry, report.cells_written) == (2, 1, 1, 1)
 
 
@@ -180,5 +181,5 @@ def test_ewkb_with_srid_is_kept(db: psycopg.Connection, tmp_path: Path) -> None:
     ewkb = struct.pack("<BIIdd", 1, 1 | 0x20000000, 4326, 13.4, 52.5)
     write_geoparquet(path, {"pop": [1], "osm_ratio": [0.5], "area": [1.0]}, [ewkb])
     create(db, SPEC)
-    load_points(db, "pop", path)
+    PostgresBackend(db).load("pop", path)
     assert [key for key in cells(db, "pop") if key[0] == 16] == [(16, quadkey.from_lonlat(13.4, 52.5, 16))]

@@ -17,6 +17,17 @@ class Layer:
     def name(self) -> str:
         return self.spec.name
 
+    def manifest(self) -> dict[str, Any]:
+        """What a consumer needs to style and identify the layer (stored in PMTiles metadata)."""
+        from gridtiles import __version__
+
+        return {
+            "version": __version__,
+            "spec": self.spec.model_dump(mode="json", exclude_none=True),
+            "stats": self.stats,
+            "bounds": self.bounds,
+        }
+
     @property
     def tile_zooms(self) -> tuple[int, int]:
         """Published tile zoom range; viewers overzoom beyond."""

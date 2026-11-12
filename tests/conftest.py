@@ -5,10 +5,9 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import psycopg
-import psycopg.conninfo
 import pytest
 
-from gridtiles.db import install
+from gridtiles.backends.postgres import install
 
 FIXTURES = Path(__file__).parent / "fixtures"
 TEST_DB = "gridtiles_test"
@@ -35,4 +34,4 @@ def fresh_database(name: str) -> str:
     with psycopg.connect(ADMIN_DSN, autocommit=True) as admin:
         admin.execute(f"drop database if exists {name} with (force)")
         admin.execute(f"create database {name}")
-    return psycopg.conninfo.make_conninfo(ADMIN_DSN, dbname=name)
+    return ADMIN_DSN.rsplit("/", 1)[0] + f"/{name}"

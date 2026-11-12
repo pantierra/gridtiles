@@ -6,25 +6,25 @@ import signal
 import subprocess
 import threading
 import tomllib
-from functools import partial
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Annotated, Any, NoReturn
 
-import psycopg
 import typer
 from pydantic import ValidationError
 
-from gridtiles import db, martin, viewer
+from gridtiles import martin, server, viewer
+from gridtiles.backends.base import Backend, MissingCapability, open_backend, require
 from gridtiles.export import export_pmtiles
-from gridtiles.ingest import MAX_CELLS_PER_FEATURE, CellLimitExceeded
-from gridtiles.ingest import load as load_source
+from gridtiles.sources import MAX_CELLS_PER_FEATURE, CellLimitExceeded
 from gridtiles.spec import LayerSpec
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, help="Quadkey grids served as zoomable vector tiles.")
 
 Db = Annotated[
-    str | None, typer.Option("--db", help="PostgreSQL URL [default: gridtiles.toml [backend] url, then $GRIDTILES_DB]")
+    str | None,
+    typer.Option("--db", help="PostgreSQL URL [default: gridtiles.toml [backend], then $GRIDTILES_DB]"),
 ]
 Config = Annotated[Path | None, typer.Option(help="Settings file [default: ./gridtiles.toml if present]")]
 
@@ -42,9 +42,14 @@ def _settings(path: Path | None) -> dict[str, Any]:
         _fail(f"Invalid {path}: {e}")
 
 
-def _db_url(flag: str | None, settings: dict[str, Any]) -> str:
-    url = flag or settings.get("backend", {}).get("url") or os.environ.get("GRIDTILES_DB")
-    return url or _fail("No database: pass --db, set [backend] url in gridtiles.toml or $GRIDTILES_DB.")
+@contextmanager
+def _backend(flag: str | None, settings: dict[str, Any]) -> Iterator[Backend]:
+    configured = settings.get("backend", {})
+    url = flag or configured.get("url") or configured.get("path") or os.environ.get("GRIDTILES_DB")
+    if not url:
+        _fail("No database: pass --db, set [backend] in gridtiles.toml or $GRIDTILES_DB.")
+    with open_backend(url, None if flag else configured.get("type")) as backend:
+        yield backend
 
 
 def _layer_spec(layer: str, spec_file: Path | None, settings: dict[str, Any]) -> LayerSpec:
@@ -67,8 +72,8 @@ def _layer_spec(layer: str, spec_file: Path | None, settings: dict[str, Any]) ->
 @app.command()
 def init(db_url: Db = None, config: Config = None) -> None:
     """Install or upgrade the gridtiles schema."""
-    with psycopg.connect(_db_url(db_url, _settings(config)), autocommit=True) as conn:
-        typer.echo(f"gridtiles schema {db.install(conn)} installed")
+    with _backend(db_url, _settings(config)) as backend:
+        typer.echo(f"gridtiles schema {backend.install()} installed")
 
 
 @app.command()
@@ -84,13 +89,13 @@ def load(
 ) -> None:
     """Load points, polygons or a raster into a layer and roll it up."""
     settings = _settings(config)
-    with psycopg.connect(_db_url(db_url, settings)) as conn:
+    with _backend(db_url, settings) as backend:
         try:
-            db.layer_spec(conn, layer)
+            backend.list_layers([layer])
         except LookupError:
-            db.create_layer(conn, _layer_spec(layer, spec, settings))
+            backend.create_layer(_layer_spec(layer, spec, settings))
         try:
-            report = load_source(conn, layer, src, max_cells_per_feature=None if force else MAX_CELLS_PER_FEATURE)
+            report = backend.load(layer, src, max_cells_per_feature=None if force else MAX_CELLS_PER_FEATURE)
         except CellLimitExceeded as e:
             _fail(f"{e} (use --force)")
         except ValueError as e:  # UnsupportedGeometry, raster CRS or pixel size, source columns
@@ -101,8 +106,8 @@ def load(
 @app.command("layers")
 def list_layers(db_url: Db = None, config: Config = None) -> None:
     """List layers with their zooms and cell counts."""
-    with psycopg.connect(_db_url(db_url, _settings(config))) as conn:
-        for layer in db.layers(conn):
+    with _backend(db_url, _settings(config)) as backend:
+        for layer in backend.list_layers():
             s, (t0, t1) = layer.spec, layer.tile_zooms
             typer.echo(f"{s.name}\tz{s.min_zoom}-{s.base_zoom}\tdetail {s.detail}\ttiles z{t0}-{t1}\t{layer.cells} cells")
 
@@ -115,9 +120,9 @@ def export(
     config: Config = None,
 ) -> None:
     """Export a layer to one PMTiles archive plus the viewer, for static hosting."""
-    with psycopg.connect(_db_url(db_url, _settings(config))) as conn:
+    with _backend(db_url, _settings(config)) as backend:
         try:
-            path = export_pmtiles(conn, layer, output)
+            path = export_pmtiles(backend, layer, output)
         except LookupError as e:
             _fail(str(e))
     typer.echo(f"Wrote {path} with index.html and config.json in {path.parent}")
@@ -126,40 +131,55 @@ def export(
 @app.command()
 def serve(
     layer: Annotated[list[str] | None, typer.Option(help="Layers to serve [default: all]")] = None,
+    live: Annotated[
+        bool | None,
+        typer.Option("--live/--embedded", help="Martin on the database, or tiles in-process [default: live if supported]"),
+    ] = None,
     port: Annotated[int, typer.Option(help="Viewer port")] = 8080,
-    martin_port: Annotated[int, typer.Option(help="Martin port")] = 3000,
+    martin_port: Annotated[int, typer.Option(help="Martin port (live)")] = 3000,
     build: Annotated[Path, typer.Option(help="Directory for generated files")] = Path("build"),
     db_url: Db = None,
     config: Config = None,
 ) -> None:
-    """Serve live tiles with Martin and the viewer, until interrupted."""
-    url = _db_url(db_url, _settings(config))
-    with psycopg.connect(url) as conn:
-        layers = db.layers(conn, layer)
-    if not layers:
-        _fail("No layers to serve: load one first.")
-    config_path = martin.write_config(build / "martin.yaml", url, layers, martin_port)
-    site = viewer.write(build / "viewer", layers, lambda lay: martin.tile_url(lay, martin_port))
-
-    def stop(*_: object) -> None:
-        raise KeyboardInterrupt
-
-    signal.signal(signal.SIGTERM, stop)
-    tiles = subprocess.Popen(martin.command(config_path))
-    server = ThreadingHTTPServer(("127.0.0.1", port), partial(SimpleHTTPRequestHandler, directory=site))
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    typer.echo(f"Viewer on http://localhost:{port}, tiles on http://localhost:{martin_port}")
-    try:
-        status = tiles.wait()  # returns only if Martin exits on its own, e.g. on a bad URL or a busy port
-        _fail(f"Martin exited with status {status}")
-    except KeyboardInterrupt:
-        pass
-    finally:
-        server.shutdown()
-        server.server_close()
-        if tiles.poll() is None:
-            tiles.terminate()
+    """Serve tiles and the viewer until interrupted."""
+    with _backend(db_url, _settings(config)) as backend:
+        layers = backend.list_layers(layer)
+        if not layers:
+            _fail("No layers to serve: load one first.")
+        live = "live" in backend.capabilities if live is None else live
+        tiles = None
+        if live:
             try:
-                tiles.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                tiles.kill()
+                require(backend, "live", "serve --live")
+            except MissingCapability as e:
+                _fail(f"{e}; use --embedded")
+            config_path = martin.write_config(build / "martin.yaml", backend.url, layers, martin_port)
+            site = viewer.write(build / "viewer", layers, lambda lay: martin.tile_url(lay, martin_port))
+            tiles = subprocess.Popen(martin.command(config_path))
+        else:
+            site = viewer.write(build / "viewer", layers, lambda lay: server.tile_url(lay.name, port))
+
+        def stop(*_: object) -> None:
+            raise KeyboardInterrupt
+
+        signal.signal(signal.SIGTERM, stop)
+        httpd = server.make_server(backend, site, port)
+        typer.echo(f"Viewer on http://localhost:{port}" + (f", tiles on http://localhost:{martin_port}" if live else ""))
+        try:
+            if tiles:
+                threading.Thread(target=httpd.serve_forever, daemon=True).start()
+                status = tiles.wait()  # returns only if Martin exits on its own, e.g. on a bad URL or a busy port
+                _fail(f"Martin exited with status {status}")
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            if tiles:
+                httpd.shutdown()  # stop the serving thread
+            httpd.server_close()
+            if tiles and tiles.poll() is None:
+                tiles.terminate()
+                try:
+                    tiles.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    tiles.kill()

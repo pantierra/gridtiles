@@ -11,7 +11,8 @@ import rasterio
 import shapely
 
 from gridtiles import quadkey
-from gridtiles.ingest import CellLimitExceeded, load, load_polygons, load_raster
+from gridtiles.backends.postgres import PostgresBackend
+from gridtiles.sources import CellLimitExceeded
 
 from ..conftest import FIXTURES
 from ..fixtures.make_fixtures import polygon_wkb, write_geoparquet, write_vector
@@ -38,7 +39,7 @@ def test_empty_polygon_is_skipped(db: psycopg.Connection, tmp_path: Path) -> Non
     empty = struct.pack("<BII", 1, 3, 0)  # a polygon without rings
     write_geoparquet(path, {k: v * 2 for k, v in COLUMNS.items()}, [square, empty])
     create(db, POLY_SPEC)
-    report = load_polygons(db, "poly", path)
+    report = PostgresBackend(db).load("poly", path)
     assert (report.records_read, report.records_loaded, report.skipped_null_geometry) == (2, 1, 1)
     assert sum(pop for _, pop in cell_rows(db, "poly", 16).values()) == pytest.approx(400)
 
@@ -48,7 +49,7 @@ def test_self_intersecting_polygon_loads(db: psycopg.Connection, tmp_path: Path)
     path = tmp_path / "bowtie.gpkg"
     write_vector(path, COLUMNS, [bowtie])
     create(db, POLY_SPEC)
-    load_polygons(db, "poly", path)
+    PostgresBackend(db).load("poly", path)
     assert sum(pop for _, pop in cell_rows(db, "poly", 16).values()) == pytest.approx(400)
 
 
@@ -56,7 +57,7 @@ def test_polygon_beyond_mercator_limit_keeps_its_total(db: psycopg.Connection, t
     path = tmp_path / "arctic.gpkg"
     write_vector(path, COLUMNS, [polygon_wkb([(10.0, 84.0), (10.01, 84.0), (10.01, 87.0), (10.0, 87.0)])])
     create(db, {**POLY_SPEC, "base_zoom": 10})
-    load_polygons(db, "poly", path)
+    PostgresBackend(db).load("poly", path)
     assert sum(pop for _, pop in cell_rows(db, "poly", 10).values()) == pytest.approx(400)
 
 
@@ -64,7 +65,7 @@ def test_polygon_reaching_the_pole_loads(db: psycopg.Connection, tmp_path: Path)
     path = tmp_path / "antarctic.gpkg"
     write_vector(path, COLUMNS, [polygon_wkb([(10.0, -90.0), (10.01, -90.0), (10.01, -84.0), (10.0, -84.0)])])
     create(db, {**POLY_SPEC, "base_zoom": 10})
-    load_polygons(db, "poly", path)
+    PostgresBackend(db).load("poly", path)
     assert sum(pop for _, pop in cell_rows(db, "poly", 10).values()) == pytest.approx(400)
 
 
@@ -75,7 +76,7 @@ def test_source_columns_named_like_sql_helpers_load(db: psycopg.Connection, tmp_
     )
     values = [{"name": "pop", "from": "v", "agg": "sum"}, {"name": "ratio", "from": "v", "agg": "mean", "weight": "g"}]
     create(db, {**POLY_SPEC, "values": values})
-    load_polygons(db, "poly", path)
+    PostgresBackend(db).load("poly", path)
     (total,) = db.execute("select sum(pop_sum) from gridtiles.cells_poly where z = 16").fetchone()
     assert total == pytest.approx(400)
 
@@ -83,7 +84,7 @@ def test_source_columns_named_like_sql_helpers_load(db: psycopg.Connection, tmp_
 def test_polygon_over_four_cells(db: psycopg.Connection, tmp_path: Path) -> None:
     qk = quadkey.from_lonlat(13.405, 52.52, 15)
     create(db, POLY_SPEC)
-    load_polygons(db, "poly", mercator_polygon(tmp_path / "four.gpkg", *quadkey.envelope(15, qk)))
+    PostgresBackend(db).load("poly", mercator_polygon(tmp_path / "four.gpkg", *quadkey.envelope(15, qk)))
     cells = cell_rows(db, "poly", 16)
     assert set(cells) == set(quadkey.child_range(15, qk, 16))
     for n, pop in cells.values():
@@ -95,7 +96,7 @@ def test_polygon_over_half_a_cell(db: psycopg.Connection, tmp_path: Path) -> Non
     qk = quadkey.from_lonlat(13.405, 52.52, 16)
     xmin, ymin, xmax, ymax = quadkey.envelope(16, qk)
     create(db, POLY_SPEC)
-    load_polygons(db, "poly", mercator_polygon(tmp_path / "half.gpkg", xmin, ymin, (xmin + xmax) / 2, ymax))
+    PostgresBackend(db).load("poly", mercator_polygon(tmp_path / "half.gpkg", xmin, ymin, (xmin + xmax) / 2, ymax))
     assert cell_rows(db, "poly", 16) == {qk: (1, pytest.approx(400, rel=1e-9))}
     (w,) = db.execute("select completeness_w from gridtiles.cells_poly where z = 16").fetchone()
     assert w == pytest.approx((xmax - xmin) * (ymax - ymin) / 2, rel=1e-9)  # weight 1 x covered area
@@ -103,7 +104,7 @@ def test_polygon_over_half_a_cell(db: psycopg.Connection, tmp_path: Path) -> Non
 
 def test_polygons_500_conserve_total(db: psycopg.Connection) -> None:
     create(db, POLY_SPEC)
-    report = load(db, "poly", FIXTURES / "polygons_500.gpkg")
+    report = PostgresBackend(db).load("poly", FIXTURES / "polygons_500.gpkg")
     assert report.records_loaded == 500
     total = sum(pyogrio.read_arrow(FIXTURES / "polygons_500.gpkg", columns=["pop"])[1]["pop"].to_pylist())
     for z in (16, 2):
@@ -113,7 +114,7 @@ def test_polygons_500_conserve_total(db: psycopg.Connection) -> None:
 
 def test_area_weighted_means_match_shapely(db: psycopg.Connection) -> None:
     create(db, POLY_SPEC)
-    load(db, "poly", FIXTURES / "polygons_500.gpkg")
+    PostgresBackend(db).load("poly", FIXTURES / "polygons_500.gpkg")
     _, table = pyogrio.read_arrow(FIXTURES / "polygons_500.gpkg")
     to_mercator = lambda lon, lat: (  # noqa: E731
         lon * quadkey.HALF_WORLD / 180,
@@ -135,15 +136,15 @@ def test_cell_limit(db: psycopg.Connection, tmp_path: Path) -> None:
     path = mercator_polygon(tmp_path / "big.gpkg", *quadkey.envelope(10, quadkey.from_lonlat(13.405, 52.52, 10)))
     create(db, POLY_SPEC)
     with pytest.raises(CellLimitExceeded), db.transaction():
-        load_polygons(db, "poly", path, max_cells_per_feature=1000)
-    load_polygons(db, "poly", path, max_cells_per_feature=None)
+        PostgresBackend(db).load("poly", path, max_cells_per_feature=1000)
+    PostgresBackend(db).load("poly", path, max_cells_per_feature=None)
     (n,) = db.execute("select count(*) from gridtiles.cells_poly where z = 16").fetchone()
     assert n == 4**6
 
 
 def test_raster(db: psycopg.Connection) -> None:
     create(db, RASTER_SPEC)
-    report = load(db, "raster", FIXTURES / "raster_100.tif")
+    report = PostgresBackend(db).load("raster", FIXTURES / "raster_100.tif")
     with rasterio.open(FIXTURES / "raster_100.tif") as src:
         data, transform = src.read(1), src.transform
     rows, cols = np.nonzero(data != -9999)
@@ -168,7 +169,7 @@ def test_raster_nan_pixels_are_skipped(db: psycopg.Connection, tmp_path: Path) -
     with rasterio.open(path, "w", transform=rasterio.transform.from_origin(1492000.3, 6894000.7, 5, 5), **profile) as dst:
         dst.write(data, 1)  # no nodata value declared
     create(db, RASTER_SPEC)
-    report = load_raster(db, "raster", path)
+    report = PostgresBackend(db).load("raster", path)
     assert report.records_loaded == 90
     (total,) = db.execute("select sum(v_sum) from gridtiles.cells_raster where z = 20").fetchone()
     assert total == 180
@@ -177,4 +178,4 @@ def test_raster_nan_pixels_are_skipped(db: psycopg.Connection, tmp_path: Path) -
 def test_raster_pixels_too_large(db: psycopg.Connection) -> None:
     create(db, {**RASTER_SPEC, "base_zoom": 23})
     with pytest.raises(ValueError, match="base_zoom"):
-        load_raster(db, "raster", FIXTURES / "raster_100.tif")
+        PostgresBackend(db).load("raster", FIXTURES / "raster_100.tif")

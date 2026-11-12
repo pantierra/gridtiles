@@ -8,9 +8,8 @@ import pytest
 from pmtiles.reader import MemorySource, Reader
 from pmtiles.tile import TileType
 
-from gridtiles import db
+from gridtiles.backends.postgres import PostgresBackend
 from gridtiles.export import export_pmtiles
-from gridtiles.ingest import load
 from gridtiles.spec import LayerSpec
 
 from ..conftest import FIXTURES, fresh_database
@@ -20,12 +19,11 @@ from ..conftest import FIXTURES, fresh_database
 def exported(tmp_path_factory: pytest.TempPathFactory) -> tuple[str, Path]:
     """A committed layer (exports read it from parallel connections) and its archive."""
     url = fresh_database("gridtiles_export")
-    with psycopg.connect(url) as conn:
-        db.install(conn)
-        db.create_layer(conn, LayerSpec.model_validate_json((FIXTURES / "spec_pop.json").read_text()))
-        load(conn, "pop", FIXTURES / "points_10k.parquet")
-    with psycopg.connect(url) as conn:
-        path = export_pmtiles(conn, "pop", tmp_path_factory.mktemp("site") / "pop.pmtiles")
+    with PostgresBackend(url) as backend:
+        backend.install()
+        backend.create_layer(LayerSpec.model_validate_json((FIXTURES / "spec_pop.json").read_text()))
+        backend.load("pop", FIXTURES / "points_10k.parquet")
+        path = export_pmtiles(backend, "pop", tmp_path_factory.mktemp("site") / "pop.pmtiles")
     return url, path
 
 
@@ -37,8 +35,8 @@ def test_header(exported: tuple[str, Path]) -> None:
     url, path = exported
     r = reader(path)
     header = r.header()
-    with psycopg.connect(url) as conn:
-        (layer,) = db.layers(conn, ["pop"])
+    with PostgresBackend(url) as backend:
+        (layer,) = backend.list_layers(["pop"])
     assert (header["min_zoom"], header["max_zoom"]) == layer.tile_zooms == (0, 12)
     assert header["tile_type"] == TileType.MVT
     west, south, east, north = layer.bounds
@@ -81,6 +79,6 @@ def test_viewer_files(exported: tuple[str, Path]) -> None:
 
 def test_exports_are_identical(exported: tuple[str, Path], tmp_path: Path) -> None:
     url, path = exported
-    with psycopg.connect(url) as conn:
-        again = export_pmtiles(conn, "pop", tmp_path / "pop.pmtiles")
+    with PostgresBackend(url) as backend:
+        again = export_pmtiles(backend, "pop", tmp_path / "pop.pmtiles")
     assert again.read_bytes() == path.read_bytes()

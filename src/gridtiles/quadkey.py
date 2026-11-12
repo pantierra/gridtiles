@@ -92,11 +92,16 @@ def envelope(z: int, qk: int) -> tuple[float, float, float, float]:
     return -HALF_WORLD + x * size, HALF_WORLD - (y + 1) * size, -HALF_WORLD + (x + 1) * size, HALF_WORLD - y * size
 
 
+def to_mercator(lon: float, lat: float) -> tuple[float, float]:
+    """WGS84 -> EPSG:3857 (spherical), latitude clamped to the Web Mercator limit."""
+    lat = math.radians(max(-MAX_LAT, min(MAX_LAT, lat)))
+    return lon * HALF_WORLD / 180, math.log(math.tan(math.pi / 4 + lat / 2)) * HALF_WORLD / math.pi
+
+
 def from_lonlat(lon: float, lat: float, z: int) -> int:
     """Cell containing a WGS84 point; latitude and longitude are clamped to the edge cells, not wrapped."""
     _check_zoom(z)
-    lat = math.radians(max(-MAX_LAT, min(MAX_LAT, lat)))
-    return _from_mercator(lon * HALF_WORLD / 180, math.log(math.tan(math.pi / 4 + lat / 2)) * HALF_WORLD / math.pi, z)
+    return _from_mercator(*to_mercator(lon, lat), z)
 
 
 def _from_mercator(mx: float, my: float, z: int) -> int:
