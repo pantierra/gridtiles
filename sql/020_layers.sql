@@ -29,11 +29,18 @@ $$;
 create or replace function gridtiles._check_spec(spec jsonb) returns void
 language plpgsql immutable parallel safe as $$
 declare
+    k text;
     v jsonb;
 begin
     if coalesce(spec->>'name', '') !~ '^[a-z][a-z0-9_]{0,47}$' then
         raise exception 'layer name % must match ^[a-z][a-z0-9_]{0,47}$', spec->'name' using errcode = '22023';
     end if;
+    -- Checked before any ::int cast, which would raise 22P02 instead of 22023; detail is optional.
+    foreach k in array array['base_zoom', 'min_zoom', 'detail'] loop
+        if (k <> 'detail' or spec->>k is not null) and coalesce(spec->>k, '') !~ '^\d{1,2}$' then
+            raise exception '% must be a non-negative integer, got %', k, spec->k using errcode = '22023';
+        end if;
+    end loop;
     if not coalesce((spec->>'min_zoom')::int between 0 and (spec->>'base_zoom')::int and (spec->>'base_zoom')::int <= 30, false) then
         raise exception 'need 0 <= min_zoom <= base_zoom <= 30, got % and %', spec->'min_zoom', spec->'base_zoom'
             using errcode = '22023';
@@ -47,6 +54,8 @@ begin
     for v in select jsonb_array_elements(spec->'values') loop
         if coalesce(v->>'name', '') !~ '^[a-z][a-z0-9_]{0,47}$' then
             raise exception 'value name % must match ^[a-z][a-z0-9_]{0,47}$', v->'name' using errcode = '22023';
+        elsif jsonb_typeof(v->'from') is distinct from 'string' then
+            raise exception 'value %: from must be a column name', v->'name' using errcode = '22023';
         elsif coalesce(v->>'agg', '') not in ('count', 'sum', 'min', 'max', 'mean') then
             raise exception 'value %: agg % not one of count, sum, min, max, mean', v->'name', v->'agg'
                 using errcode = '22023';
