@@ -11,8 +11,12 @@ from collections import defaultdict
 from pathlib import Path
 
 import mercantile
+import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pyogrio
+import rasterio
+from rasterio.transform import from_origin
 
 HERE = Path(__file__).parent
 BERLIN = (13.08, 52.33, 13.76, 52.68)  # lon_min, lat_min, lon_max, lat_max
@@ -20,6 +24,17 @@ BERLIN = (13.08, 52.33, 13.76, 52.68)  # lon_min, lat_min, lon_max, lat_max
 
 def point_wkb(x: float, y: float) -> bytes:
     return struct.pack("<BIdd", 1, 1, x, y)
+
+
+def polygon_wkb(ring: list[tuple[float, float]]) -> bytes:
+    ring = [*ring, ring[0]]
+    return struct.pack("<BII", 1, 3, 1) + struct.pack("<I", len(ring)) + b"".join(struct.pack("<dd", *p) for p in ring)
+
+
+def write_vector(path: Path, columns: dict[str, list], wkb: list[bytes], crs: str = "EPSG:4326") -> None:
+    """Write any GDAL vector format (by extension) from WKB geometries."""
+    table = pa.table({**columns, "geometry": pa.array(wkb, pa.binary())})
+    pyogrio.write_arrow(table, path, geometry_name="geometry", geometry_type="Unknown", crs=crs)
 
 
 def write_geoparquet(path: Path, columns: dict[str, list], wkb: list[bytes | None], epsg: int = 4326) -> None:
@@ -98,6 +113,43 @@ def dense_block(path: Path) -> None:
     write_geoparquet(path, {"pop": pop, "osm_ratio": [0.5] * 256, "area": [1.0] * 256}, points)
 
 
+def polygons_500() -> None:
+    """500 random rectangles and triangles, up to ~0.02 degrees across."""
+    rng = random.Random(42)
+    wkb, columns = [], {"pop": [], "osm_ratio": [], "area": []}
+    for i in range(500):
+        x, y = rng.uniform(BERLIN[0], BERLIN[2] - 0.02), rng.uniform(BERLIN[1], BERLIN[3] - 0.02)
+        w, h = rng.uniform(0.001, 0.02), rng.uniform(0.001, 0.02)
+        ring = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)] if i % 2 else [(x, y), (x + w, y), (x, y + h)]
+        wkb.append(polygon_wkb(ring))
+        columns["pop"].append(rng.randint(0, 1000))
+        columns["osm_ratio"].append(rng.random())
+        columns["area"].append(rng.uniform(1, 500))
+    path = HERE / "polygons_500.gpkg"
+    path.unlink(missing_ok=True)
+    write_vector(path, columns, wkb)
+
+
+def raster_100() -> None:
+    """100 x 100 EPSG:3857 pixels of 5 m near Berlin; value = row * 100 + col; 5-pixel nodata border."""
+    data = (np.arange(100)[:, None] * 100 + np.arange(100)[None, :]).astype("int32")
+    data[:5, :] = data[-5:, :] = data[:, :5] = data[:, -5:] = -9999
+    profile = {
+        "driver": "GTiff",
+        "width": 100,
+        "height": 100,
+        "count": 1,
+        "dtype": "int32",
+        "crs": "EPSG:3857",
+        "transform": from_origin(1492000.3, 6894000.7, 5, 5),
+        "nodata": -9999,
+    }
+    with rasterio.open(HERE / "raster_100.tif", "w", **profile) as dst:
+        dst.write(data, 1)
+
+
 if __name__ == "__main__":
     points_small()
     points_10k()
+    polygons_500()
+    raster_100()

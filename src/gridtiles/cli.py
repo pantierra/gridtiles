@@ -16,7 +16,8 @@ import typer
 from pydantic import ValidationError
 
 from gridtiles import db, martin, viewer
-from gridtiles.ingest import load_points
+from gridtiles.ingest import MAX_CELLS_PER_FEATURE, CellLimitExceeded
+from gridtiles.ingest import load as load_source
 from gridtiles.spec import LayerSpec
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, help="Quadkey grids served as zoomable vector tiles.")
@@ -74,17 +75,26 @@ def load(
     src: Path,
     layer: Annotated[str, typer.Option(help="Layer name; created if absent")],
     spec: Annotated[Path | None, typer.Option(help="Layer spec JSON for a new layer")] = None,
+    force: Annotated[
+        bool, typer.Option(help=f"Allow polygons spanning more than {MAX_CELLS_PER_FEATURE:,} base cells")
+    ] = False,
     db_url: Db = None,
     config: Config = None,
 ) -> None:
-    """Load a data file into a layer and roll it up."""
+    """Load points, polygons or a raster into a layer and roll it up."""
     settings = _settings(config)
     with psycopg.connect(_db_url(db_url, settings)) as conn:
         try:
             db.layer_spec(conn, layer)
         except LookupError:
             db.create_layer(conn, _layer_spec(layer, spec, settings))
-        typer.echo(load_points(conn, layer, src))
+        try:
+            report = load_source(conn, layer, src, max_cells_per_feature=None if force else MAX_CELLS_PER_FEATURE)
+        except CellLimitExceeded as e:
+            _fail(f"{e} (use --force)")
+        except ValueError as e:  # UnsupportedGeometry, raster CRS or pixel size, source columns
+            _fail(str(e))
+        typer.echo(report)
 
 
 @app.command("layers")

@@ -59,10 +59,16 @@ select gridtiles.drop_layer('pop');
 
 `ingest_points(name, staging regclass)` aggregates a staging table of points (a `geom` column plus one `double precision` column per value source and weight) into the layer's base cells at `z = base_zoom` and returns the number of cells written. Existing cells are merged, so repeated loads add up. Rows with a NULL or empty geometry are skipped; a NULL value contributes nothing to its value's columns.
 
+`ingest_polygons(name, staging regclass, max_cells bigint default 1000000)` splits each polygon over the base cells it overlaps (in EPSG:3857): sums get value × covered fraction, means are weighted by covered area, min/max apply to every touched cell, and `n` counts touching polygons. A polygon whose bounding box spans more than `max_cells` base cells raises SQLSTATE `54000` (`NULL`: no limit). Invalid polygons (e.g. self-intersecting) are repaired with `ST_MakeValid` first, then clipped to the Web Mercator square (±85.0511°), so a polygon's whole value lands on the cells that exist. Areas, and so shares and mean weights, are measured in EPSG:3857: within a large polygon at high latitude they favour the poleward part. WGS84 polygons are clipped before projecting, so polygons reaching the poles load; in any other CRS a polygon reaching ±90° cannot be projected and aborts the load. Polygons crossing the antimeridian are not split.
+
 ```sql
 create temp table staging (geom geometry, pop double precision, osm_ratio double precision, area double precision);
 insert into staging values ('SRID=4326;POINT(13.405 52.52)', 10, 0.5, 100);
 select gridtiles.ingest_points('pop', 'staging');  -- 1
+
+truncate staging;
+insert into staging values ('SRID=4326;POLYGON((13.40 52.51, 13.41 52.51, 13.41 52.52, 13.40 52.51))', 400, 0.5, 100);
+select gridtiles.ingest_polygons('pop', 'staging');  -- cells written
 ```
 
 ## Rollup

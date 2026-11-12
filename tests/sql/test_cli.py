@@ -74,6 +74,16 @@ def test_unreadable_spec_exits_2(url: str, tmp_path: Path, content: str | None) 
     assert "Cannot read layer spec" in result.output
 
 
+def test_raster_error_exits_2(url: str, tmp_path: Path) -> None:
+    spec = tmp_path / "raster.json"
+    spec.write_text(
+        json.dumps({"name": "x", "base_zoom": 23, "min_zoom": 12, "values": [{"name": "v", "from": "value", "agg": "sum"}]})
+    )
+    result = run("load", FIXTURES / "raster_100.tif", "--layer", "fine_raster", "--spec", spec, "--db", url)
+    assert result.exit_code == 2
+    assert "base_zoom" in result.output
+
+
 def test_missing_database_exits_2(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.delenv("GRIDTILES_DB", raising=False)
     monkeypatch.chdir(tmp_path)
