@@ -12,6 +12,7 @@ Every command takes `--db URL` and `--config FILE`. Settings precedence: flags, 
 | `gridtiles export --layer NAME -o FILE.pmtiles` | Write a PMTiles archive plus `index.html` and `config.json` next to it |
 | `gridtiles load SRC --layer NAME --snapshot YYYY-MM-DD` | Load a snapshot into a layer whose spec has `"snapshots": true` |
 | `gridtiles diff A B --as NAME` | Store B − A of two layers or snapshots (`NAME@YYYY-MM-DD`) as a read-only layer |
+| `gridtiles api [--port 8000] [--host 127.0.0.1]` | Serve the [query API](api.md) |
 
 An invalid or unreadable spec, a missing layer spec, a missing database, an unsupported geometry or a polygon spanning more than 1,000,000 base cells (without `--force`) exits with status 2, as does `serve` when Martin exits on its own (e.g. on a bad database URL or a busy port).
 

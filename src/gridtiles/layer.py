@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from typing import Any
 
+from gridtiles import __version__
 from gridtiles.spec import LayerSpec
 
 
@@ -17,6 +18,16 @@ class Layer:
     @property
     def name(self) -> str:
         return self.spec.name
+
+    def manifest(self) -> dict[str, Any]:
+        """What a consumer needs to style and identify a layer: in export metadata and the query API."""
+        return {
+            "version": __version__,
+            "spec": self.spec.model_dump(mode="json", exclude_none=True),
+            "stats": self.stats,
+            "bounds": self.bounds,
+            "snapshots": list(self.snapshots),
+        }
 
     @property
     def tile_zooms(self) -> tuple[int, int]:

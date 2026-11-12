@@ -16,21 +16,10 @@ from pmtiles.writer import Writer
 from psycopg import sql
 from psycopg.conninfo import make_conninfo
 
-from gridtiles import __version__, db, viewer
+from gridtiles import db, viewer
 from gridtiles.layer import Layer
 
 BATCH = 256
-
-
-def manifest(layer: Layer) -> dict[str, object]:
-    """What a consumer needs to style and identify a layer; stored in the archive metadata."""
-    return {
-        "version": __version__,
-        "spec": layer.spec.model_dump(mode="json", exclude_none=True),
-        "stats": layer.stats,
-        "bounds": layer.bounds,
-        "snapshots": list(layer.snapshots),
-    }
 
 
 def export_pmtiles(conn: psycopg.Connection, layer: str, out_path: str | PathLike[str], *, workers: int = 4) -> Path:
@@ -68,7 +57,7 @@ def export_pmtiles(conn: psycopg.Connection, layer: str, out_path: str | PathLik
                 "minzoom": min_zoom,
                 "maxzoom": max_zoom,
                 "vector_layers": [{"id": "cells", "minzoom": min_zoom, "maxzoom": max_zoom, "fields": _fields(info)}],
-                "gridtiles": manifest(info),
+                "gridtiles": info.manifest(),
             },
         )
     viewer.write(out.parent, [info], lambda _: out.name, merge=True)

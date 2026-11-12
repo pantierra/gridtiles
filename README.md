@@ -27,6 +27,7 @@ gridtiles serve   # open http://localhost:8080
 - [Command line](docs/cli.md)
 - [SQL reference](docs/sql.md)
 - [Python reference](docs/python.md)
+- [Query API](docs/api.md)
 
 ## Development
 

@@ -143,6 +143,21 @@ def diff(
 
 
 @app.command()
+def api(
+    port: Annotated[int, typer.Option(help="API port")] = 8000,
+    host: Annotated[str, typer.Option(help="Interface to listen on; 0.0.0.0 exposes the API to the network")] = "127.0.0.1",
+    db_url: Db = None,
+    config: Config = None,
+) -> None:
+    """Serve the query API (OpenAPI docs at /docs) until interrupted."""
+    import uvicorn
+
+    from gridtiles.api import create_app
+
+    uvicorn.run(create_app(_db_url(db_url, _settings(config))), host=host, port=port)
+
+
+@app.command()
 def export(
     layer: Annotated[str, typer.Option(help="Layer to export")],
     output: Annotated[Path, typer.Option("--output", "-o", help="PMTiles file to write")],
