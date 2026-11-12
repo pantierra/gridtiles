@@ -11,7 +11,7 @@ down:
 
 db-reset:
 	$(PSQL) -c "drop database if exists $(TEST_DB) with (force)" -c "create database $(TEST_DB)"
-	for f in sql/*.sql; do $(PSQL) -d $(TEST_DB) -f /$$f || exit 1; done
+	uv run gridtiles init --db postgresql://postgres:postgres@localhost:$${GRIDTILES_DB_PORT:-5439}/$(TEST_DB)
 
 test:
 	uv run pytest

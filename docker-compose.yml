@@ -5,8 +5,6 @@ services:
       POSTGRES_PASSWORD: postgres
     ports:
       - "127.0.0.1:${GRIDTILES_DB_PORT:-5439}:5432"
-    volumes:
-      - ./sql:/sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 2s

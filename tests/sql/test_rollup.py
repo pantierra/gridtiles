@@ -69,3 +69,8 @@ def test_stats(layer: psycopg.Connection) -> None:
     (total,) = layer.execute(f"select sum(population_sum) from gridtiles.cells_minmax where z = {ZB}").fetchone()
     assert stats["population"]["total"] == pytest.approx(total)
     assert stats["completeness"]["total"] is None and stats["pop_min"]["total"] is None
+
+
+def test_bounds_cover_the_data(layer: psycopg.Connection) -> None:
+    ((west, south, east, north),) = layer.execute("select bounds from gridtiles.layers where name = 'minmax'").fetchone()
+    assert 13.07 < west < 13.09 and 52.32 < south < 52.34 and 13.75 < east < 13.77 and 52.67 < north < 52.69
