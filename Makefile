@@ -3,11 +3,7 @@
 TEST_DB := gridtiles_test
 PSQL := docker compose exec -T db psql -v ON_ERROR_STOP=1 -U postgres
 
-build/martin.yaml:
-	mkdir -p build
-	printf 'postgres:\n  connection_string: postgresql://postgres:postgres@db:5432/postgres\n  auto_publish: false\n' > $@
-
-up: build/martin.yaml
+up:
 	docker compose up -d --wait --wait-timeout 60
 
 down:
@@ -27,5 +23,4 @@ check:
 	uv run ruff check
 	uv run ruff format --check
 	uv run mypy
-	$(MAKE) test
-	$(MAKE) e2e
+	uv run pytest -m ""

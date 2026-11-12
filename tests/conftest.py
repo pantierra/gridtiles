@@ -5,14 +5,12 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import psycopg
+import psycopg.conninfo
 import pytest
 
 SQL_DIR = Path(__file__).parent.parent / "sql"
 TEST_DB = "gridtiles_test"
-
-
-def admin_dsn() -> str:
-    return os.environ.get("GRIDTILES_TEST_DSN", "postgresql://postgres:postgres@localhost:5439/postgres")
+ADMIN_DSN = os.environ.get("GRIDTILES_TEST_DSN", "postgresql://postgres:postgres@localhost:5439/postgres")
 
 
 def apply_sql(conn: psycopg.Connection) -> None:
@@ -23,10 +21,10 @@ def apply_sql(conn: psycopg.Connection) -> None:
 @pytest.fixture(scope="session")
 def db_conn() -> Iterator[psycopg.Connection]:
     """Recreate the test database, apply the SQL files and yield a connection to it."""
-    with psycopg.connect(admin_dsn(), autocommit=True) as admin:
+    with psycopg.connect(ADMIN_DSN, autocommit=True) as admin:
         admin.execute(f"drop database if exists {TEST_DB} with (force)")
         admin.execute(f"create database {TEST_DB}")
-    dsn = psycopg.conninfo.make_conninfo(admin_dsn(), dbname=TEST_DB)
+    dsn = psycopg.conninfo.make_conninfo(ADMIN_DSN, dbname=TEST_DB)
     with psycopg.connect(dsn, autocommit=True) as conn:
         apply_sql(conn)
         yield conn

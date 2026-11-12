@@ -29,7 +29,7 @@ make down
 | `make db-reset` | Recreate the `gridtiles_test` database and apply `sql/*.sql` |
 | `make test` | Unit and SQL tests |
 | `make e2e` | End-to-end tests against the running services |
-| `make check` | ruff, mypy, `test` and `e2e` |
+| `make check` | ruff, mypy and all tests, including end-to-end |
 
 Override the host ports with `GRIDTILES_DB_PORT` and `GRIDTILES_MARTIN_PORT`, and point tests elsewhere with `GRIDTILES_TEST_DSN` and `GRIDTILES_MARTIN_URL`.
 
