@@ -16,6 +16,7 @@ import typer
 from pydantic import ValidationError
 
 from gridtiles import db, martin, viewer
+from gridtiles.export import export_pmtiles
 from gridtiles.ingest import MAX_CELLS_PER_FEATURE, CellLimitExceeded
 from gridtiles.ingest import load as load_source
 from gridtiles.spec import LayerSpec
@@ -104,6 +105,22 @@ def list_layers(db_url: Db = None, config: Config = None) -> None:
         for layer in db.layers(conn):
             s, (t0, t1) = layer.spec, layer.tile_zooms
             typer.echo(f"{s.name}\tz{s.min_zoom}-{s.base_zoom}\tdetail {s.detail}\ttiles z{t0}-{t1}\t{layer.cells} cells")
+
+
+@app.command()
+def export(
+    layer: Annotated[str, typer.Option(help="Layer to export")],
+    output: Annotated[Path, typer.Option("--output", "-o", help="PMTiles file to write")],
+    db_url: Db = None,
+    config: Config = None,
+) -> None:
+    """Export a layer to one PMTiles archive plus the viewer, for static hosting."""
+    with psycopg.connect(_db_url(db_url, _settings(config))) as conn:
+        try:
+            path = export_pmtiles(conn, layer, output)
+        except LookupError as e:
+            _fail(str(e))
+    typer.echo(f"Wrote {path} with index.html and config.json in {path.parent}")
 
 
 @app.command()
