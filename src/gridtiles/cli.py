@@ -16,7 +16,7 @@ import typer
 from pydantic import ValidationError
 
 from gridtiles import db, martin, viewer
-from gridtiles.ingest import MAX_CELLS_PER_FEATURE, CellLimitExceeded, UnsupportedGeometry
+from gridtiles.ingest import MAX_CELLS_PER_FEATURE, CellLimitExceeded
 from gridtiles.ingest import load as load_source
 from gridtiles.spec import LayerSpec
 
@@ -92,7 +92,7 @@ def load(
             report = load_source(conn, layer, src, max_cells_per_feature=None if force else MAX_CELLS_PER_FEATURE)
         except CellLimitExceeded as e:
             _fail(f"{e} (use --force)")
-        except UnsupportedGeometry as e:
+        except ValueError as e:  # UnsupportedGeometry, raster CRS or pixel size, source columns
             _fail(str(e))
         typer.echo(report)
 

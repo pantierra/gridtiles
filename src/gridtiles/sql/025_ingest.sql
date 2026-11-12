@@ -55,12 +55,17 @@ declare
 begin
     select * into strict l from gridtiles.layers where layers.name = ingest_polygons.name;
     -- ST_MakeValid repairs self-intersections, which ST_Intersection would reject; keep the polygonal
-    -- part. Clipping to the Web Mercator square keeps a polygon's whole value on the cells that exist.
+    -- part. Clipping to the Web Mercator square keeps a polygon's whole value on the cells that exist;
+    -- WGS84 polygons are clipped before projecting, since the poles have no Mercator coordinates.
     polygons := format(
-        'select *, ST_Intersection(ST_Transform(ST_CollectionExtract(ST_MakeValid(geom), 3), 3857),
+        'select *, ST_Intersection(ST_Transform(v, 3857),
                                    ST_MakeEnvelope(-20037508.342789244, -20037508.342789244,
                                                    20037508.342789244, 20037508.342789244, 3857)) as _g
-         from %s where not coalesce(ST_IsEmpty(geom), true)', staging);
+         from (select *, case when ST_SRID(geom) = 4326
+                              then ST_Intersection(g, ST_MakeEnvelope(-180, -85.06, 180, 85.06, 4326)) else g end as v
+               from (select *, ST_CollectionExtract(ST_MakeValid(geom), 3) as g from %s
+                     where not coalesce(ST_IsEmpty(geom), true)) valid) wgs84',
+        staging);
     if max_cells is not null then
         execute format(
             'select max((r.x1 - r.x0 + 1)::bigint * (r.y1 - r.y0 + 1)) from (%s) p, gridtiles._bbox_tile_range(p._g, %s) r',
