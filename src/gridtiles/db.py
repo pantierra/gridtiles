@@ -1,5 +1,7 @@
 """PostgreSQL access: schema install and the layer registry."""
 
+from dataclasses import replace
+from datetime import datetime, timedelta
 from importlib.resources import files
 
 import psycopg
@@ -39,20 +41,44 @@ def layer_spec(conn: psycopg.Connection, name: str) -> LayerSpec:
     return LayerSpec.model_validate(row[0])
 
 
-def layers(conn: psycopg.Connection, names: list[str] | None = None, *, stats: bool = False) -> list[Layer]:
-    """Registered layers, all or the named ones. With `stats`, each one's stats and bounds are
-    computed from its source, which aggregates the whole source.
+def layers(
+    conn: psycopg.Connection,
+    names: list[str] | None = None,
+    *,
+    stats: bool = False,
+    max_age: timedelta | None = None,
+    params: dict[str, str] | None = None,
+) -> list[Layer]:
+    """Registered layers, all or the named ones.
+
+    With `stats`, each layer also gets its stats and bounds (`gridtiles.cached_stats`, reused if
+    computed less than `max_age` ago; None: any cached result) and the values of its time column.
+    The stats describe the tiles of `params`, by default the latest time of a layer with one.
     """
     rows = conn.execute(
-        "select spec, case when %(stats)s then gridtiles.stats(name) end from gridtiles.layers"
-        " where %(names)s::text[] is null or name = any(%(names)s) order by name",
-        {"names": names, "stats": stats},
+        "select spec from gridtiles.layers where %(names)s::text[] is null or name = any(%(names)s) order by name",
+        {"names": names},
     ).fetchall()
-    found = [
-        Layer(LayerSpec.model_validate(spec), s and s["stats"], tuple(s["bounds"]) if s and s["bounds"] else None)
-        for spec, s in rows
-    ]
+    found = [Layer(LayerSpec.model_validate(spec)) for (spec,) in rows]
     missing = set(names or []) - {layer.name for layer in found}
     if missing:
         raise LookupError(f"unknown layers: {', '.join(sorted(missing))}")
-    return found
+    return [_with_stats(conn, layer, max_age, params) for layer in found] if stats else found
+
+
+def _with_stats(conn: psycopg.Connection, layer: Layer, max_age: timedelta | None, params: dict[str, str] | None) -> Layer:
+    row = conn.execute("select gridtiles.times(%s)", (layer.name,)).fetchone()
+    times = tuple(row[0]) if row and row[0] is not None else None
+    if params is None:
+        params = {"at": times[-1]} if times else {}
+    row = conn.execute("select gridtiles.cached_stats(%s, %s, %s)", (layer.name, Jsonb(params), max_age)).fetchone()
+    assert row is not None
+    s = row[0]
+    return replace(
+        layer,
+        stats=s["stats"],
+        bounds=tuple(s["bounds"]) if s["bounds"] else None,
+        times=times,
+        params=params,
+        computed_at=datetime.fromisoformat(s["computed_at"]),
+    )

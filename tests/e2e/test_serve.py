@@ -1,5 +1,6 @@
 """The journey: init -> import -> add -> serve, then Martin over HTTP and the viewer in a browser."""
 
+import json
 import subprocess
 import time
 import urllib.error
@@ -19,6 +20,7 @@ pytestmark = pytest.mark.e2e
 MARTIN_PORT, VIEWER_PORT = 3001, 8081
 ARTIFACTS = Path("build/e2e")
 BLOCK = mercantile.tile(13.405, 52.52, 12)
+UNIT = '<b id="injected">people</b>'
 
 
 def get(url: str) -> tuple[int, bytes]:
@@ -49,6 +51,12 @@ def journey(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
     subprocess.run([*cli, "init", "--db", url], check=True)
     subprocess.run([*cli, "import", str(FIXTURES / "points_10k.parquet"), "--table", "pop_points", "--db", url], check=True)
     subprocess.run([*cli, "add", "pop", "--spec", str(FIXTURES / "spec_pop.json"), "--db", url], check=True)
+    # Shown first (layers sort by name): spec text with HTML in it must reach the page as text.
+    spec = json.loads((FIXTURES / "spec_pop.json").read_text())
+    spec["values"][0]["unit"] = UNIT
+    html_spec = tmp_path_factory.mktemp("spec") / "html.json"
+    html_spec.write_text(json.dumps(spec))
+    subprocess.run([*cli, "add", "html", "--spec", str(html_spec), "--db", url], check=True)
     build = tmp_path_factory.mktemp("build")
     serve = [
         *cli,
@@ -138,6 +146,8 @@ def test_hover_shows_quadkey(page: Page) -> None:
     page.mouse.move(x, y)
     page.wait_for_selector(".maplibregl-popup")
     assert qk in page.inner_text(".maplibregl-popup")
+    assert UNIT in page.inner_text(".maplibregl-popup")  # escaped: shown as text, not markup
+    assert page.locator("#injected").count() == 0
 
 
 def test_legend_shows_breakpoints(page: Page) -> None:

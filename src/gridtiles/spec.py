@@ -33,12 +33,13 @@ class ValueSpec(_Model):
 
 
 class SourceSpec(_Model):
-    """The relation a layer reads; `kind` and `srid` are needed only for an untyped geometry column."""
+    """The relation a layer reads: a typed point or polygon `geometry` column, and optionally a
+    date or timestamp column `time` that tile parameters filter on.
+    """
 
     table: str
     geometry: str = "geom"
-    kind: Literal["point", "polygon"] | None = None
-    srid: int | None = Field(default=None, gt=0)
+    time: str | None = None
 
 
 class LayerSpec(_Model):

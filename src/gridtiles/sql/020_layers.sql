@@ -2,28 +2,6 @@
 -- is copied; tiles aggregate the source on request (040_mvt.sql). Spec checks mirror
 -- src/gridtiles/spec.py; an invalid spec raises SQLSTATE 22023.
 
--- Databases installed before live aggregation hold a materialized registry (cell tables, rollup).
--- Its objects are dropped on upgrade; registered layers would lose their cells, so they must be
--- dropped by the user first.
-do $$
-begin
-    if exists (select from information_schema.columns
-               where table_schema = 'gridtiles' and table_name = 'layers' and column_name = 'cells') then
-        if exists (select from gridtiles.layers) then
-            raise exception 'gridtiles.layers holds materialized layers (%): drop them with gridtiles.drop_layer before upgrading',
-                (select string_agg(name, ', ' order by name) from gridtiles.layers) using errcode = '55000';
-        end if;
-        drop function if exists gridtiles.ingest_points(text, regclass), gridtiles.ingest_polygons(text, regclass, bigint),
-            gridtiles.rollup(text), gridtiles._insert_cells(gridtiles.layers, text, text),
-            gridtiles._bbox_tile_range(geometry, int), gridtiles._mercator_polygon(geometry),
-            gridtiles._columns(jsonb), gridtiles._merge(text, text, text), gridtiles._column_list(jsonb),
-            gridtiles._aggregates(jsonb, text, text), gridtiles._merge_set(jsonb, text, text),
-            gridtiles._merge_aggregates(jsonb), gridtiles._properties(jsonb),
-            gridtiles._mvt_query(text, int, int, int), gridtiles.mvt(text, int, int, int);
-        drop table gridtiles.layers;
-    end if;
-end $$;
-
 create table if not exists gridtiles.layers (
     name text primary key check (name ~ '^[a-z][a-z0-9_]{0,47}$'),
     spec jsonb not null,
@@ -31,10 +9,22 @@ create table if not exists gridtiles.layers (
     geometry text not null,
     srid int not null,
     kind text not null check (kind in ('point', 'polygon')),
+    time_column text,  -- filtered by the tile parameters at, start, end and diff
+    time_type regtype,
     zb smallint not null,
     zmin smallint not null,
     detail smallint not null,
     created_at timestamptz not null default now()
+);
+
+-- Cached results of gridtiles.stats, which aggregates a whole source: a cache that may lag the
+-- source, labelled with when it was computed. Tiles never read it.
+create table if not exists gridtiles.stats_cache (
+    layer text not null references gridtiles.layers (name) on delete cascade,
+    params jsonb not null,
+    stats jsonb not null,
+    computed_at timestamptz not null,
+    primary key (layer, params)
 );
 
 create or replace function gridtiles._check_spec(spec jsonb) returns void
@@ -51,14 +41,12 @@ begin
         raise exception 'source must be an object with a table name' using errcode = '22023';
     elsif src->'geometry' is not null and jsonb_typeof(src->'geometry') <> 'string' then
         raise exception 'source.geometry must be a column name' using errcode = '22023';
-    elsif src->'kind' is not null and src->>'kind' not in ('point', 'polygon') then
-        raise exception 'source.kind % not one of point, polygon', src->'kind' using errcode = '22023';
-    elsif src->'srid' is not null and coalesce(src->>'srid', '') !~ '^[1-9]\d{0,8}$' then
-        raise exception 'source.srid must be a positive integer, got %', src->'srid' using errcode = '22023';
-    elsif exists (select from jsonb_object_keys(src) o(key) where o.key not in ('table', 'geometry', 'kind', 'srid')) then
+    elsif src->'time' is not null and jsonb_typeof(src->'time') <> 'string' then
+        raise exception 'source.time must be a column name' using errcode = '22023';
+    elsif exists (select from jsonb_object_keys(src) o(key) where o.key not in ('table', 'geometry', 'time')) then
         raise exception 'source has unknown keys' using errcode = '22023';
     end if;
-    -- Checked before any ::int cast, which would raise 22P02 instead of 22023; detail is optional.
+    -- Checked ahead of the ::int casts below; detail is optional.
     foreach k in array array['base_zoom', 'min_zoom', 'detail'] loop
         if (k <> 'detail' or spec->>k is not null) and coalesce(spec->>k, '') !~ '^\d{1,2}$' then
             raise exception '% must be a non-negative integer, got %', k, spec->k using errcode = '22023';
@@ -102,92 +90,61 @@ language sql immutable strict parallel safe as $$
     group by col
 $$;
 
+-- The type of a source column; raises SQLSTATE 42703 if it does not exist.
+create or replace function gridtiles._column_type(rel regclass, col text, out typ regtype, out typmod int)
+language plpgsql stable as $$
+begin
+    select atttypid, atttypmod into typ, typmod from pg_attribute
+    where attrelid = rel and attname = col and attnum > 0 and not attisdropped;
+    if not found then
+        raise exception 'source % has no column %', rel, col using errcode = '42703';
+    end if;
+end $$;
+
+-- Register a layer over its source: a typed point or polygon geometry column, numeric value
+-- columns and an optional date or timestamp column. Creates the tile function tile_<name>, a
+-- Martin function source: a malformed URL parameter gives an empty tile and a logged warning.
 create or replace function gridtiles.create_layer(spec jsonb) returns void
 language plpgsql as $$
-#variable_conflict use_variable
 declare
     name text := spec->>'name';
     rel regclass;
-    relkind char;
-    qualified text;
     geom text := coalesce(spec#>>'{source,geometry}', 'geom');
-    att record;
-    srid int;
+    time_column text := spec#>>'{source,time}';
+    g record;
+    time_type regtype;
     kind text;
-    s record;
+    col text;
 begin
     perform gridtiles._check_spec(spec);
     rel := to_regclass(spec#>>'{source,table}');
     if rel is null then
         raise exception 'source table % does not exist', spec#>'{source,table}' using errcode = '42P01';
     end if;
-    select format('%I.%I', n.nspname, c.relname), c.relkind into qualified, relkind
-    from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = rel;
-
-    select atttypid, atttypmod into att from pg_attribute
-    where attrelid = rel and attname = geom and attnum > 0 and not attisdropped;
-    if not found then
-        raise exception 'source % has no column %', qualified, geom using errcode = '42703';
-    elsif att.atttypid <> 'geometry'::regtype then
-        raise exception 'source column %.% is %, not geometry', qualified, geom, format_type(att.atttypid, att.atttypmod)
-            using errcode = '42804';
+    g := gridtiles._column_type(rel, geom);
+    kind := case regexp_replace(postgis_typmod_type(g.typmod), '(ZM|Z|M)$', '')
+        when 'Point' then 'point' when 'Polygon' then 'polygon' when 'MultiPolygon' then 'polygon' end;
+    if g.typ <> 'geometry'::regtype or kind is null or postgis_typmod_srid(g.typmod) = 0 then
+        raise exception 'source column %.% is %, not geometry(Point|Polygon|MultiPolygon, <srid>)', rel, geom,
+            format_type(g.typ, g.typmod) using errcode = '42804';
     end if;
-
-    -- SRID and kind come from the column's type modifier, or from the spec for an untyped column.
-    srid := nullif(postgis_typmod_srid(att.atttypmod), 0);
-    if srid is not null and (spec#>>'{source,srid}')::int is distinct from null and (spec#>>'{source,srid}')::int <> srid then
-        raise exception 'source.srid % differs from the SRID % of %.%', spec#>'{source,srid}', srid, qualified, geom
-            using errcode = '22023';
-    end if;
-    srid := coalesce(srid, (spec#>>'{source,srid}')::int);
-    if srid is null then
-        raise exception 'column %.% has no SRID constraint: set source.srid', qualified, geom using errcode = '22023';
-    elsif not exists (select from spatial_ref_sys r where r.srid = srid) then
-        raise exception 'SRID % is not in spatial_ref_sys', srid using errcode = '22023';
-    end if;
-    kind := case regexp_replace(postgis_typmod_type(att.atttypmod), '(ZM|Z|M)$', '')
-        when 'Point' then 'point' when 'Polygon' then 'polygon' when 'MultiPolygon' then 'polygon'
-        when 'Geometry' then spec#>>'{source,kind}'
-    end;
-    if kind is null and postgis_typmod_type(att.atttypmod) <> 'Geometry' then
-        raise exception 'column %.% holds %; only points and polygons are supported', qualified, geom,
-            postgis_typmod_type(att.atttypmod) using errcode = '0A000';
-    elsif kind is null then
-        raise exception 'column %.% has no geometry type constraint: set source.kind', qualified, geom
-            using errcode = '22023';
-    elsif spec#>>'{source,kind}' is distinct from null and spec#>>'{source,kind}' <> kind then
-        raise exception 'source.kind % differs from the % column %.%', spec#>'{source,kind}', kind, qualified, geom
-            using errcode = '22023';
-    end if;
-
-    for s in select * from gridtiles._sources(spec) loop
-        select atttypid, atttypmod into att from pg_attribute
-        where attrelid = rel and attname = s.col and attnum > 0 and not attisdropped;
-        if not found then
-            raise exception 'source % has no column %', qualified, s.col using errcode = '42703';
-        elsif (select typcategory from pg_type where oid = att.atttypid) <> 'N' then
-            raise exception 'source column %.% is %, not numeric', qualified, s.col, format_type(att.atttypid, att.atttypmod)
+    if time_column is not null then
+        time_type := (gridtiles._column_type(rel, time_column)).typ;
+        if time_type not in ('date'::regtype, 'timestamp'::regtype, 'timestamptz'::regtype) then
+            raise exception 'source.time column %.% is %, not a date or timestamp', rel, time_column, time_type
                 using errcode = '42804';
+        end if;
+    end if;
+    for col in select s.col from gridtiles._sources(spec) s loop
+        if (select typcategory from pg_type where oid = (gridtiles._column_type(rel, col)).typ) <> 'N' then
+            raise exception 'source column %.% is not numeric', rel, col using errcode = '42804';
         end if;
     end loop;
 
-    -- Tiles filter on the geometry (EPSG:4326 and 3857) or on its transform to 4326 (any other SRID).
-    if relkind in ('r', 'p', 'm') and not exists (
-        select from pg_index i join pg_class ic on ic.oid = i.indexrelid join pg_am am on am.oid = ic.relam
-        where i.indrelid = rel and am.amname = 'gist' and (
-            (srid in (3857, 4326) and i.indexprs is null
-             and (select attnum from pg_attribute where attrelid = rel and attname = geom) = any(i.indkey::int2[]))
-            or (srid not in (3857, 4326) and pg_get_indexdef(i.indexrelid) ilike '%st_transform(%' || geom || '%4326)%'))
-    ) then
-        raise warning 'source % has no GiST index for tiles: create index on % using gist (%)', qualified, qualified,
-            case when srid in (3857, 4326) then quote_ident(geom) else format('ST_Transform(%I, 4326)', geom) end;
-    end if;
-
-    insert into gridtiles.layers (name, spec, source, geometry, srid, kind, zb, zmin, detail)
-    values (name, spec, qualified, geom, srid, kind, (spec->>'base_zoom')::int, (spec->>'min_zoom')::int,
-            coalesce((spec->>'detail')::int, 4));
-    -- Tile server entry point (Martin function source, which passes the URL query as query_params).
-    -- A malformed parameter (SQLSTATE 22023) gives an empty tile and a logged warning, not an error.
+    insert into gridtiles.layers (name, spec, source, geometry, srid, kind, time_column, time_type, zb, zmin, detail)
+    select name, spec, format('%I.%I', n.nspname, c.relname), geom, postgis_typmod_srid(g.typmod), kind, time_column,
+        time_type, (spec->>'base_zoom')::int, (spec->>'min_zoom')::int, coalesce((spec->>'detail')::int, 4)
+    from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = rel;
     execute format(
         'create function gridtiles.%I(z integer, x integer, y integer, query_params json) returns bytea
          language plpgsql stable as $f$

@@ -1,1 +1,0 @@
-{"name": "pop", "source": {"table": "pop_points", "kind": "line"}, "base_zoom": 16, "min_zoom": 2, "values": [{"name": "population", "from": "pop", "agg": "sum"}]}

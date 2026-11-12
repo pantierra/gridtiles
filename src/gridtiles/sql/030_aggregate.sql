@@ -71,18 +71,68 @@ begin
     sy := format('least(greatest(floor((20037508.342789244 - (%s)) / %s), 0), %s)::int', my, size, top);
 end $$;
 
+-- Request parameters on the layer's time column, as SQL conditions: `filter` selects the source
+-- rows; for a diff, `side_b` and `side_a` tell its two sides apart. Raises SQLSTATE 22023 on a
+-- malformed parameter, before any value is cast. Unknown keys are ignored, since tile servers
+-- forward every URL query parameter.
+--   at=V           time = V (a snapshot)
+--   start=V, end=V time >= start, time < end; either may be absent
+--   diff=V         with at: the tile of `at` minus the tile of `diff`
+create or replace function gridtiles._time_filter(l gridtiles.layers, params jsonb,
+    out filter text, out side_b text, out side_a text)
+language plpgsql stable parallel safe as $$
+declare
+    k text;
+    col text := quote_ident(l.time_column);
+    typ text := l.time_type::text;
+begin
+    filter := 'true';
+    if jsonb_typeof(params) is distinct from 'object' then
+        raise exception 'tile parameters must be a JSON object, got %', params using errcode = '22023';
+    end if;
+    foreach k in array array['at', 'start', 'end', 'diff'] loop
+        continue when not params ? k;
+        if l.time_column is null then
+            raise exception 'parameter %: layer % has no time column', k, l.name using errcode = '22023';
+        elsif jsonb_typeof(params->k) <> 'string' then
+            raise exception 'parameter %: expected a string, got %', k, params->k using errcode = '22023';
+        elsif not pg_input_is_valid(params->>k, typ) then
+            raise exception 'parameter %: % is not a valid %', k, quote_literal(params->>k), typ using errcode = '22023';
+        end if;
+    end loop;
+    if params ? 'at' and (params ? 'start' or params ? 'end') then
+        raise exception 'parameter at excludes start and end' using errcode = '22023';
+    elsif params ? 'diff' and not params ? 'at' then
+        raise exception 'parameter diff needs at' using errcode = '22023';
+    end if;
+    if params ? 'diff' then
+        side_b := format('%s = %L::%s', col, params->>'at', typ);
+        side_a := format('%s = %L::%s', col, params->>'diff', typ);
+        filter := format('(%s or %s)', side_b, side_a);
+    elsif params ? 'at' then
+        filter := format('%s = %L::%s', col, params->>'at', typ);
+    elsif params ? 'start' or params ? 'end' then
+        filter := concat_ws(' and ',
+            case when params ? 'start' then format('%s >= %L::%s', col, params->>'start', typ) end,
+            case when params ? 'end' then format('%s < %L::%s', col, params->>'end', typ) end);
+    end if;
+end $$;
+
 -- The source rows of a region: `_g`, the geometry ready to aggregate (a point in EPSG:3857 or
--- 4326, see _square_sql; a polygon from _mercator_polygon), and each source column as double
--- precision under its alias (_sources), so source column names never clash with the query's own.
-create or replace function gridtiles._source_sql(l gridtiles.layers, filter text) returns text
+-- 4326, see _square_sql; a polygon from _mercator_polygon), each source column as double
+-- precision under its alias (_sources), so source column names never clash with the query's own,
+-- and for a diff the booleans _in_b and _in_a. `region` and `time` are SQL conditions.
+create or replace function gridtiles._source_sql(l gridtiles.layers, region text, "time" text,
+    side_b text, side_a text) returns text
 language sql stable parallel safe as $$
-    select format('select %s as _g%s from %s where %s and not ST_IsEmpty(%I)',
+    select format('select %s as _g%s%s from %s where %s and %s and not ST_IsEmpty(%I)',
         case when l.kind = 'polygon' then format('gridtiles._mercator_polygon(%I)', l.geometry)
              when l.srid in (3857, 4326) then quote_ident(l.geometry)
              else format('ST_Transform(%I, 4326)', l.geometry) end,
         coalesce((select string_agg(format(', %I::double precision as %s', s.col, s.alias), '' order by s.alias)
                   from gridtiles._sources(l.spec) s), ''),
-        l.source, filter, l.geometry)
+        case when side_b is not null then format(', %s as _in_b, %s as _in_a', side_b, side_a) else '' end,
+        l.source, region, "time", l.geometry)
 $$;
 
 -- A polygon in EPSG:3857, ready to split: ST_MakeValid repairs self-intersections (which
@@ -109,57 +159,80 @@ language sql immutable strict parallel safe as $$
     from (select 40075016.68557849::double precision / (1::bigint << z) as size, (1 << z) - 1 as top) k
 $$;
 
--- A sum over the rows of a square. Float sums depend on their order; `gridtiles.sum_mode` picks
--- how they are made reproducible: 'ordered' (default) sums the terms in ascending order,
--- 'numeric' sums them exactly as numeric (order-independent, so parallel aggregation applies;
--- each term is rounded to 15 significant digits), 'plain' leaves the order to the executor.
-create or replace function gridtiles._sum_sql(term text) returns text
+-- A sum over the rows of a square (those matching `cond`, if given). Float sums depend on their
+-- order; `gridtiles.sum_mode` picks how they are made reproducible: 'ordered' (default) sums the
+-- terms in ascending order, 'numeric' sums them exactly as numeric (order-independent, so
+-- parallel aggregation applies; each term is rounded to 15 significant digits), 'plain' leaves
+-- the order to the executor.
+create or replace function gridtiles._sum_sql(term text, cond text default null) returns text
 language sql stable parallel safe as $$
     select case coalesce(nullif(current_setting('gridtiles.sum_mode', true), ''), 'ordered')
-        when 'numeric' then format('sum((%s)::numeric)::double precision', term)
-        when 'plain' then format('sum(%s)', term)
-        else format('sum(%1$s order by %1$s)', term)
+        when 'numeric' then format('(sum((%s)::numeric)%s)::double precision', term, f)
+        when 'plain' then format('sum(%s)%s', term, f)
+        else format('sum(%1$s order by %1$s)%2$s', term, f)
     end
+    from (select case when cond is not null then format(' filter (where %s)', cond) else '' end) x(f)
 $$;
 
--- Comma-led tile properties of a layer's values over the aggregated rows: sums add each value
--- times `share` (1 for a point), means weigh it by its weight times `area` (1 for a point), as
--- the materialized ingest did; min/max ignore both. Count values are the property `n`.
-create or replace function gridtiles._values_sql(spec jsonb, share text default '1', area text default '1') returns text
+-- Each non-count value as an aggregate over the rows of a square (those matching `cond`, if
+-- given): sums add the value times `share` (1 for a point), means weigh it by its weight times
+-- `area` (1 for a point); min/max ignore both. Count values are
+-- the property `n`.
+create or replace function gridtiles._value_exprs(spec jsonb, share text, area text, cond text default null)
+returns table (name text, agg text, expr text, i bigint)
 language sql stable parallel safe as $$
-    select coalesce(string_agg(', ' || case v->>'agg'
-        when 'sum' then gridtiles._sum_sql(format('%s * %s', s.alias, share))
+    select v->>'name', v->>'agg', case v->>'agg'
+        when 'sum' then gridtiles._sum_sql(format('%s * %s', s.alias, share), cond)
         when 'mean' then format('%s / nullif(%s, 0)',
-            gridtiles._sum_sql(format('%s * %s * %s', s.alias, w, area)),
-            gridtiles._sum_sql(format('case when %s is not null then %s * %s end', s.alias, w, area)))
-        else format('%s(%s)', v->>'agg', s.alias)
-    end || ' as ' || quote_ident(v->>'name'), '' order by e.i), '')
+            gridtiles._sum_sql(format('%s * %s * %s', s.alias, w, area), cond),
+            gridtiles._sum_sql(format('case when %s is not null then %s * %s end', s.alias, w, area), cond))
+        else format('%s(%s)%s', v->>'agg', s.alias, case when cond is not null then format(' filter (where %s)', cond) else '' end)
+    end, e.i
     from jsonb_array_elements(spec->'values') with ordinality e(v, i)
     join gridtiles._sources(spec) s on s.col = v->>'from'
     left join lateral (select coalesce((select alias from gridtiles._sources(spec) where col = v->>'weight'), '1')) x(w) on true
     where v->>'agg' <> 'count'
 $$;
 
+-- `n` and the comma-led value columns of a square. For a diff, side b minus side a: counts and
+-- sums treat a side without data as 0; means, minima and maxima exist only where both sides have
+-- data.
+create or replace function gridtiles._values_sql(spec jsonb, share text, area text, diff boolean) returns text
+language sql stable parallel safe as $$
+    select case when not diff then 'count(*) as n' || coalesce(
+        (select string_agg(format(', %s as %I', expr, name), '' order by i) from gridtiles._value_exprs(spec, share, area)), '')
+    else 'count(*) filter (where _in_b) - count(*) filter (where _in_a) as n' || coalesce(
+        (select string_agg(format(case when b.agg = 'sum' then ', coalesce(%s, 0) - coalesce(%s, 0) as %I'
+                                       else ', %s - %s as %I' end, b.expr, a.expr, b.name), '' order by b.i)
+         from gridtiles._value_exprs(spec, share, area, '_in_b') b
+         join gridtiles._value_exprs(spec, share, area, '_in_a') a using (i)), '')
+    end
+$$;
+
 -- One row per square of the region with data: _x, _y, n and one column per non-count value.
 -- Points: each point counts in the square holding it. Polygons: each polygon is split over the
--- squares it overlaps by covered area (in EPSG:3857), as the materialized ingest did: sums get
+-- squares it overlaps by covered area (in EPSG:3857): sums get
 -- value x covered fraction, means are weighted by covered area, min/max apply to every touched
 -- square, and n counts the polygons touching a square; a zero-area touch does not count. A
 -- polygon is clipped to the region once (unless it lies inside), then intersected per square;
 -- its share divides by the area of the whole polygon. `offset 0` keeps the planner from inlining
 -- a subquery's expressions into every reference, which would repair, project and clip a polygon
 -- again for every square.
-create or replace function gridtiles._aggregate_sql(l gridtiles.layers, c int, z int, x int, y int) returns text
+create or replace function gridtiles._aggregate_sql(l gridtiles.layers, c int, z int, x int, y int, params jsonb)
+returns text
 language plpgsql stable parallel safe as $$
 declare
+    t record := gridtiles._time_filter(l, params);
     reg record := gridtiles._region(l, c, z, x, y);
+    src text := gridtiles._source_sql(l, reg.filter, t.filter, t.side_b, t.side_a);
+    diff boolean := t.side_b is not null;
     sq record;
     r int := least(z, c);
     envelope text := format('ST_TileEnvelope(%s, %s, %s)', r, x >> (z - r), y >> (z - r));
 begin
     if l.kind = 'polygon' then
         return format(
-            'select _x, _y, count(*) as n%s from (
+            'select _x, _y, %s from (
                 select p.*, _x, _y, _a, _a / p._total as _share
                 from (select *, case when _g @ %2$s then _g else ST_Intersection(_g, %2$s) end as _r
                       from (select *, ST_Area(_g) as _total from (%3$s offset 0) s offset 0) s
@@ -169,23 +242,22 @@ begin
                     generate_series(greatest(b.y0, %7$s), least(b.y1, %8$s)) _y,
                     lateral (select ST_Area(ST_Intersection(p._r, ST_TileEnvelope(%4$s, _x, _y))) as _a) a
              ) h where _a > 0 group by _x, _y',
-            gridtiles._values_sql(l.spec, '_share', '_a'), envelope, gridtiles._source_sql(l, reg.filter),
-            c, reg.x0, reg.x1, reg.y0, reg.y1);
+            gridtiles._values_sql(l.spec, '_share', '_a', diff), envelope, src, c, reg.x0, reg.x1, reg.y0, reg.y1);
     end if;
     sq := gridtiles._square_sql(l.srid, c);
     return format(
-        'select _x, _y, count(*) as n%s from (select %s as _x, %s as _y, * from (%s%s) s) p
+        'select _x, _y, %s from (select %s as _x, %s as _y, * from (%s%s) s) p
          where _x between %s and %s and _y between %s and %s group by _x, _y',
-        gridtiles._values_sql(l.spec), sq.sx, sq.sy, gridtiles._source_sql(l, reg.filter),
+        gridtiles._values_sql(l.spec, '1', '1', diff), sq.sx, sq.sy, src,
         case when l.srid in (3857, 4326) then '' else ' offset 0' end,  -- one transform per point
         reg.x0, reg.x1, reg.y0, reg.y1);
 end $$;
 
--- What the viewer styles with: per value, at the base zoom over the whole source, the `total`
--- (count and sum only), `min`, `max` and 7 quantile `breaks` (1/8 ... 7/8) of the tile property;
--- and `bounds`, the WGS84 extent [west, south, east, north] of the base squares with data.
--- Computed from the source on every call: it aggregates the whole source.
-create or replace function gridtiles.stats(name text) returns jsonb
+-- What the viewer styles with: per value, at the base zoom over the whole source (filtered by
+-- `params`, as tiles are), the `total` (count and sum only), `min`, `max` and 7 quantile `breaks`
+-- (1/8 ... 7/8) of the tile property; and `bounds`, the WGS84 extent [west, south, east, north]
+-- of the base squares with data. It aggregates the whole source.
+create or replace function gridtiles.stats(name text, params jsonb default '{}') returns jsonb
 language plpgsql stable parallel safe as $$
 declare
     l gridtiles.layers;
@@ -206,15 +278,34 @@ begin
             from jsonb_array_elements(l.spec->'values') with ordinality e(v, i),
                 lateral (select case when v->>'agg' = 'count' then 'n' else quote_ident(v->>'name') end) q(p)),
             '''{}''::jsonb'),
-        l.zb, gridtiles._aggregate_sql(l, l.zb, 0, 0, 0)
+        l.zb, gridtiles._aggregate_sql(l, l.zb, 0, 0, 0, params)
     ) into result;
     return result;
+end $$;
+
+-- The distinct values of a layer's time column, ascending, as text; NULL without a time column or
+-- with more than `max_count` values.
+create or replace function gridtiles.times(name text, max_count int default 1000) returns text[]
+language plpgsql stable parallel safe as $$
+declare
+    l gridtiles.layers;
+    result text[];
+begin
+    select * into strict l from gridtiles.layers where layers.name = times.name;
+    if l.time_column is null then
+        return null;
+    end if;
+    execute format(
+        'select array_agg(t::text order by t) from (select distinct %1$I as t from %2$s where %1$I is not null limit %3$s) d',
+        l.time_column, l.source, max_count + 1) into result;
+    return case when cardinality(result) > max_count then null else coalesce(result, '{}') end;
 end $$;
 
 -- Every tile with data in the published zoom range [max(0, zmin - detail), max(0, zb - detail)]:
 -- the tiles with data at the highest published zoom (holding a point, or overlapping a polygon),
 -- and their ancestors. A square's index at a coarser zoom is its index shifted right.
-create or replace function gridtiles.tiles_with_data(name text) returns table (z int, x int, y int)
+create or replace function gridtiles.tiles_with_data(name text, params jsonb default '{}')
+returns table (z int, x int, y int)
 language plpgsql stable parallel safe as $$
 declare
     l gridtiles.layers;
@@ -228,5 +319,23 @@ begin
         'select t, _x >> (%1$s - t), _y >> (%1$s - t)
          from (select _x, _y from (%2$s) a) a, generate_series(%3$s, %1$s) t
          group by 1, 2, 3 order by 1, 2, 3',
-        tmax, gridtiles._aggregate_sql(l, tmax, 0, 0, 0), tmin);
+        tmax, gridtiles._aggregate_sql(l, tmax, 0, 0, 0, params), tmin);
+end $$;
+
+-- gridtiles.stats from gridtiles.stats_cache if computed less than `max_age` ago (NULL: any
+-- cached result), otherwise computed and cached; `computed_at` tells when.
+create or replace function gridtiles.cached_stats(name text, params jsonb default '{}', max_age interval default null)
+returns jsonb
+language plpgsql as $$
+declare
+    cached gridtiles.stats_cache;
+begin
+    select * into cached from gridtiles.stats_cache c where c.layer = cached_stats.name and c.params = cached_stats.params;
+    if not found or (max_age is not null and cached.computed_at <= clock_timestamp() - max_age) then
+        insert into gridtiles.stats_cache as c (layer, params, stats, computed_at)
+        values (name, params, gridtiles.stats(name, params), clock_timestamp())
+        on conflict on constraint stats_cache_pkey do update set stats = excluded.stats, computed_at = excluded.computed_at
+        returning * into cached;
+    end if;
+    return cached.stats || jsonb_build_object('computed_at', cached.computed_at);
 end $$;

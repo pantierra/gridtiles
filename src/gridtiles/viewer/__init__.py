@@ -1,16 +1,22 @@
-"""The single-page MapLibre viewer and the `config.json` it reads."""
+"""The single-page MapLibre viewer, the `config.json` it reads, and a server for it."""
 
 import json
 from collections.abc import Callable
+from functools import partial
+from http.server import SimpleHTTPRequestHandler
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
+
+import psycopg
 
 from gridtiles.layer import Layer
 
 
 def config(layers: list[Layer], tiles: Callable[[Layer], str]) -> dict[str, Any]:
-    """`tiles` gives each layer's XYZ URL template or PMTiles path."""
+    """`tiles` gives each layer's XYZ URL template or PMTiles path. On XYZ sources the viewer adds
+    `params` as the URL query, and offers a time slider over `times`.
+    """
     return {
         "layers": [
             {
@@ -22,15 +28,53 @@ def config(layers: list[Layer], tiles: Callable[[Layer], str]) -> dict[str, Any]
                 "bounds": layer.bounds,
                 "values": [{"name": v.name, "agg": v.agg, "unit": v.unit} for v in layer.spec.values],
                 "stats": layer.stats,
+                "times": list(layer.times) if layer.times is not None else None,
+                "params": layer.params,
             }
             for layer in layers
         ]
     }
 
 
-def write(directory: Path, layers: list[Layer], tiles: Callable[[Layer], str]) -> Path:
-    """Write `index.html` and `config.json` into `directory`."""
+def write(directory: Path, layers: list[Layer], tiles: Callable[[Layer], str], *, merge: bool = False) -> Path:
+    """Write `index.html` and `config.json` into `directory`. With `merge`, layers already in an
+    existing `config.json` stay (replaced by name), so several exports can share one folder.
+    """
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "index.html").write_bytes(files("gridtiles.viewer").joinpath("index.html").read_bytes())
-    (directory / "config.json").write_text(json.dumps(config(layers, tiles), indent=2) + "\n")
+    new = config(layers, tiles)
+    path = directory / "config.json"
+    if merge and path.exists():
+        names = {layer["name"] for layer in new["layers"]}
+        kept = [layer for layer in json.loads(path.read_text())["layers"] if layer["name"] not in names]
+        new["layers"] = sorted(kept + new["layers"], key=lambda layer: layer["name"])
+    path.write_text(json.dumps(new, indent=2) + "\n")
     return directory
+
+
+class _Handler(SimpleHTTPRequestHandler):
+    """Static files, except `config.json`, built per request."""
+
+    def __init__(self, *args: Any, live_config: Callable[[], dict[str, Any]], **kwargs: Any) -> None:
+        self.live_config = live_config
+        super().__init__(*args, **kwargs)
+
+    def do_GET(self) -> None:
+        if self.path.split("?")[0] != "/config.json":
+            return super().do_GET()
+        try:
+            body = (json.dumps(self.live_config()) + "\n").encode()
+        except (psycopg.Error, LookupError) as e:  # e.g. the database is unreachable: tell the browser
+            self.send_error(503, f"config.json: {e}")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def handler(directory: Path, live_config: Callable[[], dict[str, Any]]) -> Callable[..., SimpleHTTPRequestHandler]:
+    """A request handler serving `directory`, with `config.json` from `live_config()` on every request."""
+    return partial(_Handler, directory=str(directory), live_config=live_config)

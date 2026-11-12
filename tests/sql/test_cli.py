@@ -27,7 +27,7 @@ def run(*args: str | Path):
 def test_help_lists_commands() -> None:
     result = run("--help")
     assert result.exit_code == 0
-    for command in ("init", "import", "add", "drop", "layers", "serve", "export"):
+    for command in ("init", "import", "add", "drop", "layers", "stats", "serve", "export"):
         assert command in result.output
     assert "load" not in result.output
 
@@ -69,7 +69,6 @@ def test_add_with_source_flags(url: str, tmp_path: Path) -> None:
     spec.write_text(json.dumps({"base_zoom": 14, "min_zoom": 4, "values": [{"name": "p", "from": "pop", "agg": "sum"}]}))
     result = run("add", "flags", "--source", "renamed", "--geometry", "shape", "--spec", spec, "--db", url)
     assert result.exit_code == 0, result.output
-    assert "WARNING" not in result.output
 
 
 def test_add_from_toml(url: str, tmp_path: Path) -> None:
@@ -81,14 +80,6 @@ def test_add_from_toml(url: str, tmp_path: Path) -> None:
     result = run("add", "small", "--config", config)
     assert result.exit_code == 0, result.output
     assert "Added layer small over pop_points" in result.output
-
-
-def test_add_warns_without_index(url: str) -> None:
-    with psycopg.connect(url) as conn:
-        conn.execute("create table if not exists unindexed as select * from pop_points")
-    result = run("add", "unindexed", "--source", "unindexed", "--spec", FIXTURES / "spec_pop.json", "--db", url)
-    assert result.exit_code == 0
-    assert "WARNING: source public.unindexed has no GiST index" in result.output
 
 
 @pytest.mark.parametrize("path", sorted((FIXTURES / "invalid_specs").glob("*.json")), ids=lambda p: p.stem)
@@ -108,6 +99,21 @@ def test_unreadable_spec_exits_2(url: str, tmp_path: Path, content: str | None) 
     result = run("add", "unread", "--spec", path, "--db", url)
     assert result.exit_code == 2
     assert "Cannot read layer spec" in result.output
+
+
+def test_stats_and_export(url: str, tmp_path: Path) -> None:
+    assert run("add", "stats", "--spec", FIXTURES / "spec_pop.json", "--db", url).exit_code == 0
+    result = run("stats", "stats", "--refresh", "--db", url)
+    assert result.exit_code == 0, result.output
+    out = json.loads(result.output)
+    assert out["params"] == {} and out["computed_at"]
+    with psycopg.connect(url) as conn:
+        assert conn.execute("select sum(pop) from pop_points").fetchone() == (out["stats"]["population"]["total"],)
+    assert run("stats", "missing", "--db", url).exit_code == 2
+    assert run("stats", "stats", "--at", "2024-01-01", "--db", url).exit_code == 2  # no time column
+    result = run("export", "--layer", "stats", "-o", tmp_path / "stats.pmtiles", "--db", url)
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "stats.pmtiles").exists()
 
 
 def test_bad_source_exits_2(url: str) -> None:

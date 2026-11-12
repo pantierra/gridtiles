@@ -6,8 +6,8 @@ import signal
 import subprocess
 import threading
 import tomllib
-from functools import partial
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from datetime import timedelta
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Annotated, Any, NoReturn
 
@@ -25,6 +25,8 @@ app = typer.Typer(no_args_is_help=True, add_completion=False, help="Quadkey grid
 Db = Annotated[
     str | None, typer.Option("--db", help="PostgreSQL URL [default: gridtiles.toml [backend] url, then $GRIDTILES_DB]")
 ]
+STATS_MAX_AGE = timedelta(minutes=5)
+
 Config = Annotated[Path | None, typer.Option(help="Settings file [default: ./gridtiles.toml if present]")]
 
 
@@ -140,22 +142,48 @@ def list_layers(db_url: Db = None, config: Config = None) -> None:
     with psycopg.connect(_db_url(db_url, _settings(config))) as conn:
         for layer in db.layers(conn):
             s, (t0, t1) = layer.spec, layer.tile_zooms
-            typer.echo(f"{s.name}\t{s.source.table}\tz{s.min_zoom}-{s.base_zoom}\tdetail {s.detail}\ttiles z{t0}-{t1}")
+            time = f"\ttime {s.source.time}" if s.source.time else ""
+            typer.echo(f"{s.name}\t{s.source.table}\tz{s.min_zoom}-{s.base_zoom}\tdetail {s.detail}\ttiles z{t0}-{t1}{time}")
+
+
+@app.command()
+def stats(
+    layer: str,
+    at: Annotated[str | None, typer.Option(help="Time to describe [default: the latest, if any]")] = None,
+    refresh: Annotated[bool, typer.Option(help="Recompute instead of reusing cached stats")] = False,
+    db_url: Db = None,
+    config: Config = None,
+) -> None:
+    """Print a layer's stats and bounds, as the viewer gets them, with when they were computed."""
+    with _connect(_db_url(db_url, _settings(config))) as conn:
+        try:
+            params = {"at": at} if at else None
+            (info,) = db.layers(conn, [layer], stats=True, max_age=timedelta(0) if refresh else None, params=params)
+        except LookupError as e:
+            _fail(str(e))
+        except psycopg.errors.InvalidParameterValue as e:
+            _fail(str(e.diag.message_primary))
+    computed_at = info.computed_at.isoformat() if info.computed_at else None
+    out = {"params": info.params, "computed_at": computed_at, "bounds": info.bounds, "stats": info.stats}
+    typer.echo(json.dumps(out, indent=2))
 
 
 @app.command()
 def export(
     layer: Annotated[str, typer.Option(help="Layer to export")],
     output: Annotated[Path, typer.Option("--output", "-o", help="PMTiles file to write")],
+    at: Annotated[str | None, typer.Option(help="Time to export [default: the latest, if any]")] = None,
     db_url: Db = None,
     config: Config = None,
 ) -> None:
     """Export a layer to one PMTiles archive plus the viewer, for static hosting."""
-    with psycopg.connect(_db_url(db_url, _settings(config))) as conn:
+    with _connect(_db_url(db_url, _settings(config))) as conn:
         try:
-            path = export_pmtiles(conn, layer, output)
+            path = export_pmtiles(conn, layer, output, params={"at": at} if at else None)
         except LookupError as e:
             _fail(str(e))
+        except psycopg.errors.InvalidParameterValue as e:
+            _fail(str(e.diag.message_primary))
     typer.echo(f"Wrote {path} with index.html and config.json in {path.parent}")
 
 
@@ -171,18 +199,28 @@ def serve(
     """Serve live tiles with Martin and the viewer, until interrupted."""
     url = _db_url(db_url, _settings(config))
     with psycopg.connect(url) as conn:
-        layers = db.layers(conn, layer, stats=True)
+        try:
+            layers = db.layers(conn, layer)
+        except LookupError as e:
+            _fail(str(e))
     if not layers:
         _fail("No layers to serve: add one first.")
+    names = [lay.name for lay in layers]
     config_path = martin.write_config(build / "martin.yaml", url, layers, martin_port)
     site = viewer.write(build / "viewer", layers, lambda lay: martin.tile_url(lay, martin_port))
+
+    def live_config() -> dict[str, Any]:
+        """Stats come from the source, cached for STATS_MAX_AGE."""
+        with psycopg.connect(url) as conn:
+            fresh = db.layers(conn, names, stats=True, max_age=STATS_MAX_AGE)
+        return viewer.config(fresh, lambda lay: martin.tile_url(lay, martin_port))
 
     def stop(*_: object) -> None:
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, stop)
     tiles = subprocess.Popen(martin.command(config_path))
-    server = ThreadingHTTPServer(("127.0.0.1", port), partial(SimpleHTTPRequestHandler, directory=site))
+    server = ThreadingHTTPServer(("127.0.0.1", port), viewer.handler(site, live_config))
     threading.Thread(target=server.serve_forever, daemon=True).start()
     typer.echo(f"Viewer on http://localhost:{port}, tiles on http://localhost:{martin_port}")
     try:
