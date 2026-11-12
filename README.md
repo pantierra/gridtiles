@@ -11,6 +11,11 @@ Turn any point, polygon or raster dataset into a quadkey grid and serve it as zo
 uv add gridtiles
 ```
 
+## Documentation
+
+- [SQL reference](docs/sql.md)
+- [Python reference](docs/python.md)
+
 ## Development
 
 Requires [uv](https://docs.astral.sh/uv/) and Docker with Compose.
