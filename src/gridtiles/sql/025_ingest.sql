@@ -54,7 +54,10 @@ declare
     polygons text;
 begin
     select * into strict l from gridtiles.layers where layers.name = ingest_polygons.name;
-    polygons := format('select *, ST_Transform(geom, 3857) as _g from %s where not coalesce(ST_IsEmpty(geom), true)', staging);
+    -- ST_MakeValid repairs self-intersections, which ST_Intersection would reject; keep the polygonal part.
+    polygons := format(
+        'select *, ST_Transform(ST_CollectionExtract(ST_MakeValid(geom), 3), 3857) as _g from %s
+         where not coalesce(ST_IsEmpty(geom), true)', staging);
     if max_cells is not null then
         execute format(
             'select max((r.x1 - r.x0 + 1)::bigint * (r.y1 - r.y0 + 1)) from (%s) p, gridtiles._bbox_tile_range(p._g, %s) r',

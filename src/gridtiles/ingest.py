@@ -127,7 +127,7 @@ def load_raster(conn: psycopg.Connection, layer: str, path: Path_, *, band: int 
         srid = src.crs.to_epsg() if src.crs else None
         if srid is None:
             raise ValueError(f"{path}: raster CRS is not an EPSG code")
-        data = src.read(band, masked=True)
+        data = np.ma.masked_invalid(src.read(band, masked=True))  # nodata, and NaN in float rasters without one
         rows, cols = np.nonzero(~np.ma.getmaskarray(data))
         xs, ys = rasterio.transform.xy(src.transform, rows, cols, offset="center")
         _check_pixel_size(src, spec.base_zoom)

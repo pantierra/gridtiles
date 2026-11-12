@@ -88,8 +88,10 @@ def load(
             db.create_layer(conn, _layer_spec(layer, spec, settings))
         try:
             report = load_source(conn, layer, src, max_cells_per_feature=None if force else 1_000_000)
-        except (CellLimitExceeded, UnsupportedGeometry) as e:
-            _fail(f"{e}{' (use --force)' if isinstance(e, CellLimitExceeded) else ''}")
+        except CellLimitExceeded as e:
+            _fail(f"{e} (use --force)")
+        except UnsupportedGeometry as e:
+            _fail(str(e))
         typer.echo(report)
 
 

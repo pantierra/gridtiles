@@ -43,6 +43,15 @@ def test_empty_polygon_is_skipped(db: psycopg.Connection, tmp_path: Path) -> Non
     assert sum(pop for _, pop in cell_rows(db, "poly", 16).values()) == pytest.approx(400)
 
 
+def test_self_intersecting_polygon_loads(db: psycopg.Connection, tmp_path: Path) -> None:
+    bowtie = polygon_wkb([(13.40, 52.51), (13.41, 52.52), (13.41, 52.51), (13.40, 52.52)])
+    path = tmp_path / "bowtie.gpkg"
+    write_vector(path, COLUMNS, [bowtie])
+    create(db, POLY_SPEC)
+    load_polygons(db, "poly", path)
+    assert sum(pop for _, pop in cell_rows(db, "poly", 16).values()) == pytest.approx(400)
+
+
 def test_polygon_over_four_cells(db: psycopg.Connection, tmp_path: Path) -> None:
     qk = quadkey.from_lonlat(13.405, 52.52, 15)
     create(db, POLY_SPEC)
@@ -121,6 +130,20 @@ def test_raster(db: psycopg.Connection) -> None:
         qk = quadkey.from_xyz(20, math.floor((x + quadkey.HALF_WORLD) / size), math.floor((quadkey.HALF_WORLD - y) / size))
         oracle[qk] = oracle.get(qk, 0) + float(data[r, c])
     assert dict(db.execute("select qk, v_sum from gridtiles.cells_raster where z = 20").fetchall()) == oracle
+
+
+def test_raster_nan_pixels_are_skipped(db: psycopg.Connection, tmp_path: Path) -> None:
+    path = tmp_path / "nan.tif"
+    data = np.full((10, 10), 2.0, dtype="float32")
+    data[0, :] = np.nan
+    profile = {"driver": "GTiff", "width": 10, "height": 10, "count": 1, "dtype": "float32", "crs": "EPSG:3857"}
+    with rasterio.open(path, "w", transform=rasterio.transform.from_origin(1492000.3, 6894000.7, 5, 5), **profile) as dst:
+        dst.write(data, 1)  # no nodata value declared
+    create(db, RASTER_SPEC)
+    report = load_raster(db, "raster", path)
+    assert report.records_loaded == 90
+    (total,) = db.execute("select sum(v_sum) from gridtiles.cells_raster where z = 20").fetchone()
+    assert total == 180
 
 
 def test_raster_pixels_too_large(db: psycopg.Connection) -> None:
