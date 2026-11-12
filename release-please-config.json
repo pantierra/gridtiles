@@ -10,6 +10,10 @@
           "type": "toml",
           "path": "uv.lock",
           "jsonpath": "$.package[?(@.name.value=='gridtiles')].version"
+        },
+        {
+          "type": "generic",
+          "path": "sql/001_schema.sql"
         }
       ],
       "changelog-sections": [
