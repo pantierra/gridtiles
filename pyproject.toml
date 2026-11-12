@@ -8,6 +8,7 @@ license-files = ["LICENSE"]
 authors = [{ name = "Development Seed" }]
 requires-python = ">=3.12"
 dependencies = [
+    "numpy>=2.5.4",
     "psycopg[binary]>=3.2",
     "pyarrow>=26.0.0",
     "pydantic>=2.14.2",

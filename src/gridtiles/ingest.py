@@ -57,13 +57,10 @@ class LoadReport:
     cells_written: int
 
 
-Path_ = str | PathLike[str]
-
-
 def load(
     conn: psycopg.Connection,
     layer: str,
-    path: Path_,
+    path: str | PathLike[str],
     *,
     lon: str | None = None,
     lat: str | None = None,
@@ -81,7 +78,7 @@ def load(
 def load_points(
     conn: psycopg.Connection,
     layer: str,
-    path: Path_,
+    path: str | PathLike[str],
     *,
     lon: str | None = None,
     lat: str | None = None,
@@ -100,7 +97,7 @@ def load_points(
 def load_polygons(
     conn: psycopg.Connection,
     layer: str,
-    path: Path_,
+    path: str | PathLike[str],
     *,
     crs: str = "EPSG:4326",
     rollup: bool = True,
@@ -114,7 +111,9 @@ def load_polygons(
     return _load_vector(conn, layer, Path(path), "polygon", None, None, crs, rollup, max_cells_per_feature)
 
 
-def load_raster(conn: psycopg.Connection, layer: str, path: Path_, *, band: int = 1, rollup: bool = True) -> LoadReport:
+def load_raster(
+    conn: psycopg.Connection, layer: str, path: str | PathLike[str], *, band: int = 1, rollup: bool = True
+) -> LoadReport:
     """Load each valid pixel of a band as a point at the pixel centre, with the source column `value`.
 
     Raises ValueError if pixels are larger than half a base cell; use a lower base zoom then.
