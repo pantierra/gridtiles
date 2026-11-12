@@ -1,5 +1,6 @@
 """The v0.1 journey: init -> load -> serve, then Martin over HTTP and the viewer in a browser."""
 
+import json
 import subprocess
 import time
 import urllib.error
@@ -50,6 +51,11 @@ def journey(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
     load = [*cli, "load", str(FIXTURES / "points_10k.parquet"), "--layer", "pop", "--spec", str(FIXTURES / "spec_pop.json")]
     subprocess.run([*load, "--db", url], check=True)
     build = tmp_path_factory.mktemp("build")
+    spec = build / "spec_ts.json"  # a layer with two snapshots, for the time slider
+    spec.write_text(json.dumps({**json.loads((FIXTURES / "spec_pop.json").read_text()), "snapshots": True}))
+    for path, day in (("points_10k.parquet", "2026-10-01"), ("points_10k_v2.parquet", "2026-11-01")):
+        ts = [*cli, "load", str(FIXTURES / path), "--layer", "ts", "--spec", str(spec), "--snapshot", day]
+        subprocess.run([*ts, "--db", url], check=True)
     serve = [
         *cli,
         "serve",
@@ -128,6 +134,21 @@ def test_legend_shows_breakpoints(page: Page) -> None:
         "window.current.stats.population.breaks[0].toLocaleString(undefined, {maximumSignificantDigits: 4})"
     )
     assert first in classes.nth(0).inner_text()
+
+
+def test_time_slider_changes_features(page: Page) -> None:
+    rendered = "JSON.stringify(window.map.queryRenderedFeatures({layers: ['cells']}).map((f) => f.properties))"
+    page.select_option("#layer", label="ts")
+    page.wait_for_function("window.current.name === 'ts' && window.map.loaded() && window.map.areTilesLoaded()")
+    assert page.is_visible("#time") and page.inner_text("#snapshot-label") == "2026-11-01"
+    latest = page.evaluate(rendered)
+    page.evaluate(
+        "() => { const s = document.getElementById('snapshot'); s.value = 0; s.dispatchEvent(new Event('input')); }"
+    )
+    assert page.inner_text("#snapshot-label") == "2026-10-01"
+    page.wait_for_function(f"(latest) => {rendered} !== latest", arg=latest)  # times out if nothing changes
+    ARTIFACTS.mkdir(parents=True, exist_ok=True)
+    page.screenshot(path=ARTIFACTS / "viewer-snapshot.png")
 
 
 def test_upsert_shows_immediately(journey: str) -> None:

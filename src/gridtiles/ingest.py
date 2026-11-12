@@ -11,6 +11,7 @@ import struct
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import date
 from os import PathLike
 from pathlib import Path
 from typing import Literal
@@ -70,9 +71,11 @@ def load(
     band: int = 1,
     rollup: bool = True,
     max_cells_per_feature: int | None = MAX_CELLS_PER_FEATURE,
+    snapshot: date | None = None,
 ) -> LoadReport:
-    """Load points, polygons or a raster, detected from the source."""
-    return _load(conn, layer, Path(path), lon, lat, crs, band, rollup, max_cells_per_feature, None)
+    """Load points, polygons or a raster, detected from the source; on snapshot layers into the
+    cells of `snapshot` (required there), rolling up only that snapshot."""
+    return _load(conn, layer, Path(path), lon, lat, crs, band, rollup, max_cells_per_feature, None, snapshot)
 
 
 def upsert(
@@ -92,12 +95,13 @@ def upsert(
     overwrites the base cells it touches. Only those cells and their ancestors are rewritten, and
     the result equals a full rollup. Stats, cell count and bounds are refreshed only with
     `refresh_stats` (they scan the base level)."""
-    layer_spec(conn, layer)  # LookupError for an unknown layer
+    if layer_spec(conn, layer).snapshots:  # LookupError for an unknown layer
+        raise ValueError(f"layer {layer!r} has snapshots: load a new snapshot instead of upserting")
     delta = sql.Identifier(DELTA)
     with conn.transaction():
         cells = sql.Identifier("gridtiles", f"cells_{layer}")
         conn.execute(sql.SQL("create temp table {} (like {} including all)").format(delta, cells))
-        report = _load(conn, layer, Path(path), lon, lat, crs, band, False, max_cells_per_feature, DELTA)
+        report = _load(conn, layer, Path(path), lon, lat, crs, band, False, max_cells_per_feature, DELTA, None)
         row = conn.execute("select gridtiles.apply_delta(%s, %s::regclass, %s)", (layer, DELTA, mode)).fetchone()
         conn.execute(sql.SQL("drop table {}").format(delta))
         if refresh_stats:
@@ -117,11 +121,12 @@ def _load(
     rollup: bool,
     max_cells: int | None,
     target: str | None,
+    snapshot: date | None,
 ) -> LoadReport:
     """`load`, writing base cells into `target` (a table shaped like the cell table) if given."""
     if path.suffix.lower() in RASTER_SUFFIXES:
-        return _load_raster(conn, layer, path, band, rollup, target)
-    return _load_vector(conn, layer, path, None, lon, lat, crs, rollup, max_cells, target)
+        return _load_raster(conn, layer, path, band, rollup, target, snapshot)
+    return _load_vector(conn, layer, path, None, lon, lat, crs, rollup, max_cells, target, snapshot)
 
 
 def load_points(
@@ -167,11 +172,17 @@ def load_raster(
 
     Raises ValueError if pixels are larger than half a base cell; use a lower base zoom then.
     """
-    return _load_raster(conn, layer, Path(path), band, rollup, None)
+    return _load_raster(conn, layer, Path(path), band, rollup, None, None)
 
 
 def _load_raster(
-    conn: psycopg.Connection, layer: str, path: Path, band: int, rollup: bool, target: str | None
+    conn: psycopg.Connection,
+    layer: str,
+    path: Path,
+    band: int,
+    rollup: bool,
+    target: str | None,
+    snapshot: date | None,
 ) -> LoadReport:
     spec = layer_spec(conn, layer)
     sources = _sources(conn, layer)
@@ -191,7 +202,7 @@ def _load_raster(
     )
     with conn.transaction():
         _stage(conn, sources, records)
-        cells = _ingest(conn, layer, "point", None, rollup, target)
+        cells = _ingest(conn, layer, "point", None, rollup, target, snapshot)
     return LoadReport(len(values), len(values), 0, cells)
 
 
@@ -229,6 +240,7 @@ def _load_vector(
     rollup: bool,
     max_cells: int | None,
     target: str | None = None,
+    snapshot: date | None = None,
 ) -> LoadReport:
     sources = _sources(conn, layer)
     counts = {"read": 0, "loaded": 0}
@@ -252,7 +264,7 @@ def _load_vector(
 
     with conn.transaction(), _open(path, sources, lon, lat, crs) as (srid, batches):
         _stage(conn, sources, records(srid, batches))
-        cells = _ingest(conn, layer, found[0] if found else "point", max_cells, rollup, target)
+        cells = _ingest(conn, layer, found[0] if found else "point", max_cells, rollup, target, snapshot)
     return LoadReport(counts["read"], counts["loaded"], counts["read"] - counts["loaded"], cells)
 
 
@@ -268,24 +280,32 @@ def _stage(conn: psycopg.Connection, sources: list[str], records: Iterable[tuple
 
 
 def _ingest(
-    conn: psycopg.Connection, layer: str, kind: Kind, max_cells: int | None, rollup: bool, target: str | None = None
+    conn: psycopg.Connection,
+    layer: str,
+    kind: Kind,
+    max_cells: int | None,
+    rollup: bool,
+    target: str | None = None,
+    snapshot: date | None = None,
 ) -> int:
     """Aggregate the staging table into base cells (or `target`), drop it and optionally roll up."""
     try:
         if kind == "polygon":
-            query = "select gridtiles.ingest_polygons(%s, %s::regclass, %s, %s::regclass)"
-            row = conn.execute(query, (layer, STAGING, max_cells, target)).fetchone()
+            query = "select gridtiles.ingest_polygons(%s, %s::regclass, %s, %s::regclass, %s)"
+            row = conn.execute(query, (layer, STAGING, max_cells, target, snapshot)).fetchone()
         else:
-            query = "select gridtiles.ingest_points(%s, %s::regclass, %s::regclass)"
-            row = conn.execute(query, (layer, STAGING, target)).fetchone()
+            query = "select gridtiles.ingest_points(%s, %s::regclass, %s::regclass, %s)"
+            row = conn.execute(query, (layer, STAGING, target, snapshot)).fetchone()
     except errors.ProgramLimitExceeded as e:
         message = str(e.diag.message_primary)
         if "max_cells_per_feature" not in message:  # another limit, e.g. an index row too large
             raise
         raise CellLimitExceeded(message) from e
+    except (errors.InvalidParameterValue, errors.FeatureNotSupported) as e:  # snapshot missing, a diff layer
+        raise ValueError(str(e.diag.message_primary)) from e
     conn.execute(sql.SQL("drop table {}").format(sql.Identifier(STAGING)))
     if rollup:
-        conn.execute("select gridtiles.rollup(%s)", (layer,))
+        conn.execute("select gridtiles.rollup(%s, %s)", (layer, snapshot))
     assert row is not None
     return int(row[0])
 

@@ -12,6 +12,7 @@ class Layer:
     stats: dict[str, Any] | None  # per value: total, min, max, breaks (set by rollup)
     cells: int | None  # rows over all zooms (set by rollup)
     bounds: tuple[float, float, float, float] | None  # WGS84 [west, south, east, north] of the base cells
+    snapshots: tuple[str, ...] = ()  # ISO dates, oldest first, on snapshot layers
 
     @property
     def name(self) -> str:

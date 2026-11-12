@@ -6,6 +6,7 @@ import signal
 import subprocess
 import threading
 import tomllib
+from datetime import date
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -82,12 +83,19 @@ def load(
     append: Annotated[bool, typer.Option(help="Add to the layer incrementally instead of rolling up fully")] = False,
     replace_cells: Annotated[bool, typer.Option(help="Overwrite the base cells the source touches, incrementally")] = False,
     refresh_stats: Annotated[bool, typer.Option(help="With --append / --replace-cells: refresh stats and bounds")] = False,
+    snapshot: Annotated[str | None, typer.Option(help="Snapshot date (YYYY-MM-DD) on snapshot layers")] = None,
     db_url: Db = None,
     config: Config = None,
 ) -> None:
     """Load points, polygons or a raster into a layer and roll it up."""
     if append and replace_cells:
         _fail("Use either --append or --replace-cells.")
+    if snapshot and (append or replace_cells):
+        _fail("Snapshots are loaded, not upserted: drop --append / --replace-cells.")
+    try:
+        day = date.fromisoformat(snapshot) if snapshot else None
+    except ValueError:
+        _fail(f"Invalid snapshot date {snapshot!r}: use YYYY-MM-DD.")
     settings = _settings(config)
     with psycopg.connect(_db_url(db_url, settings)) as conn:
         try:
@@ -100,7 +108,7 @@ def load(
                 mode: UpsertMode = "replace" if replace_cells else "add"
                 report = upsert(conn, layer, src, mode=mode, refresh_stats=refresh_stats, max_cells_per_feature=max_cells)
             else:
-                report = load_source(conn, layer, src, max_cells_per_feature=max_cells)
+                report = load_source(conn, layer, src, max_cells_per_feature=max_cells, snapshot=day)
         except CellLimitExceeded as e:
             _fail(f"{e} (use --force)")
         except ValueError as e:  # UnsupportedGeometry, raster CRS or pixel size, source columns
@@ -115,6 +123,23 @@ def list_layers(db_url: Db = None, config: Config = None) -> None:
         for layer in db.layers(conn):
             s, (t0, t1) = layer.spec, layer.tile_zooms
             typer.echo(f"{s.name}\tz{s.min_zoom}-{s.base_zoom}\tdetail {s.detail}\ttiles z{t0}-{t1}\t{layer.cells} cells")
+
+
+@app.command()
+def diff(
+    a: Annotated[str, typer.Argument(help="Layer A, as NAME or NAME@YYYY-MM-DD")],
+    b: Annotated[str, typer.Argument(help="Layer B, as NAME or NAME@YYYY-MM-DD")],
+    name: Annotated[str, typer.Option("--as", help="Name of the new, read-only layer holding B - A")],
+    db_url: Db = None,
+    config: Config = None,
+) -> None:
+    """Store the per-cell difference B - A of two layers or snapshots as a new layer."""
+    with psycopg.connect(_db_url(db_url, _settings(config))) as conn:
+        try:
+            db.diff(conn, a, b, name)
+        except (LookupError, ValueError) as e:
+            _fail(str(e))
+    typer.echo(f"Created layer {name} = {b} - {a}")
 
 
 @app.command()
@@ -149,7 +174,12 @@ def serve(
     if not layers:
         _fail("No layers to serve: load one first.")
     config_path = martin.write_config(build / "martin.yaml", url, layers, martin_port)
-    site = viewer.write(build / "viewer", layers, lambda lay: martin.tile_url(lay, martin_port))
+    site = viewer.write(
+        build / "viewer",
+        layers,
+        lambda lay: martin.tile_url(lay, martin_port),
+        lambda lay: martin.snapshot_tile_url(lay, martin_port),
+    )
 
     def stop(*_: object) -> None:
         raise KeyboardInterrupt

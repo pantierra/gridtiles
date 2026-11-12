@@ -29,12 +29,14 @@ def manifest(layer: Layer) -> dict[str, object]:
         "spec": layer.spec.model_dump(mode="json", exclude_none=True),
         "stats": layer.stats,
         "bounds": layer.bounds,
+        "snapshots": list(layer.snapshots),
     }
 
 
 def export_pmtiles(conn: psycopg.Connection, layer: str, out_path: str | PathLike[str], *, workers: int = 4) -> Path:
     """Write every tile with data in the published zoom range to a PMTiles archive (gzip-compressed
-    MVT), with `index.html` and `config.json` next to it. Exports of the same data are identical.
+    MVT; the latest snapshot on snapshot layers), with `index.html` and `config.json` next to it;
+    layers exported into the same folder share the viewer. Exports of the same data are identical.
     """
     (info,) = db.layers(conn, [layer])
     out = Path(out_path)
@@ -69,20 +71,23 @@ def export_pmtiles(conn: psycopg.Connection, layer: str, out_path: str | PathLik
                 "gridtiles": manifest(info),
             },
         )
-    viewer.write(out.parent, [info], lambda _: out.name)
+    viewer.write(out.parent, [info], lambda _: out.name, merge=True)
     return out
 
 
 def _tiles_with_data(conn: psycopg.Connection, layer: Layer) -> Iterator[tuple[int, int, int]]:
-    """(z, x, y) of every tile with data: the distinct ancestors at zoom t of the cells at c(t)."""
+    """(z, x, y) of every tile with data: the distinct ancestors at zoom t of the cells at c(t); of the
+    latest snapshot on snapshot layers, which is what `gridtiles.mvt` serves by default."""
     spec, table = layer.spec, sql.Identifier("gridtiles", f"cells_{layer.name}")
+    latest = sql.SQL(" and snapshot = %(latest)s" if layer.snapshots else "")
     for t in range(layer.tile_zooms[0], layer.tile_zooms[1] + 1):
         c = min(max(t + spec.detail, spec.min_zoom), spec.base_zoom)
         query = sql.SQL(
-            "select xy.x, xy.y from (select distinct qk >> %(shift)s as tile from {} where z = %(c)s) d,"
+            "select xy.x, xy.y from (select distinct qk >> %(shift)s as tile from {} where z = %(c)s{}) d,"
             " gridtiles.qk_to_xy(%(t)s, tile) xy"
-        ).format(table)
-        yield from ((t, x, y) for x, y in conn.execute(query, {"shift": 2 * (c - t), "c": c, "t": t}))
+        ).format(table, latest)
+        params = {"shift": 2 * (c - t), "c": c, "t": t, "latest": layer.snapshots[-1] if layer.snapshots else None}
+        yield from ((t, x, y) for x, y in conn.execute(query, params))
 
 
 class _TileFetcher:

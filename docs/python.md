@@ -18,7 +18,7 @@ quadkey.from_lonlat(13.405, 52.52, 16)  # cell containing the point
 
 ## `gridtiles.spec`
 
-`LayerSpec` and `ValueSpec` validate a layer spec: name `^[a-z][a-z0-9_]{0,47}$`, `0 ≤ min_zoom ≤ base_zoom ≤ 30`, `detail` in 0–8 (default 4), unique value names, `agg` one of `count`, `sum`, `min`, `max`, `mean`, and `weight` only with `mean`.
+`LayerSpec` and `ValueSpec` validate a layer spec: name `^[a-z][a-z0-9_]{0,47}$`, `0 ≤ min_zoom ≤ base_zoom ≤ 30`, `detail` in 0–8 (default 4), unique value names, `agg` one of `count`, `sum`, `min`, `max`, `mean`, and `weight` only with `mean`. `snapshots: true` keeps dated versions of the layer; `diff` is set only on layers made by `diff`.
 
 ```python
 from gridtiles.spec import LayerSpec
@@ -50,6 +50,8 @@ spec.model_dump_json()  # JSON accepted by gridtiles.create_layer
 The load and the rollup run in one transaction, so a failing rollup rolls back the load. Each rollup rebuilds every coarser level, so when loading many files pass `rollup=False` and call the SQL function once at the end: `conn.execute("select gridtiles.rollup(%s)", (layer,))`.
 
 `upsert(conn, layer, path, *, mode="add", refresh_stats=False, ...)` applies a batch to an existing layer incrementally: `add` merges it like `load`, `replace` overwrites the base cells it touches. Only those cells and their ancestors are rewritten, and the result equals a full rollup, so it is the cheap way to keep a large layer up to date. Stats, cell count and bounds are refreshed only with `refresh_stats=True`, since that scans the base level. Concurrent upserts into one layer apply one after the other.
+
+On a layer whose spec has `"snapshots": true`, `load(..., snapshot=date(...))` loads into that snapshot's cells and rolls up only it; every load must name its snapshot, and upserts are refused. `gridtiles.db.diff(conn, a, b, name)` stores B − A of two `"layer[@YYYY-MM-DD]"` references as a read-only layer (see [sql.md](sql.md#diff)); `db.layers()` lists each layer's `snapshots`.
 
 ```python
 import psycopg

@@ -84,3 +84,21 @@ def test_exports_are_identical(exported: tuple[str, Path], tmp_path: Path) -> No
     with psycopg.connect(url) as conn:
         again = export_pmtiles(conn, "pop", tmp_path / "pop.pmtiles")
     assert again.read_bytes() == path.read_bytes()
+
+
+def test_exports_share_a_folder(tmp_path: Path) -> None:
+    url = fresh_database("gridtiles_export_shared")
+    spec = LayerSpec.model_validate_json((FIXTURES / "spec_pop.json").read_text())
+    with psycopg.connect(url) as conn:
+        db.install(conn)
+        for name in ("pop", "other"):
+            db.create_layer(conn, spec.model_copy(update={"name": name}))
+            load(conn, name, FIXTURES / "points_small.csv")
+    with psycopg.connect(url) as conn:
+        for name in ("pop", "other"):
+            export_pmtiles(conn, name, tmp_path / f"{name}.pmtiles")
+    config = json.loads((tmp_path / "config.json").read_text())
+    assert [(layer["name"], layer["tiles"]) for layer in config["layers"]] == [
+        ("other", "other.pmtiles"),
+        ("pop", "pop.pmtiles"),
+    ]
