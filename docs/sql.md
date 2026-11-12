@@ -1,10 +1,12 @@
 # SQL reference
 
-Functions live in the `gridtiles` schema, installed from `sql/*.sql`.
+Functions live in the `gridtiles` schema, installed from `sql/*.sql`. Requires PostgreSQL 16 or later (the SQL uses hexadecimal integer literals) and PostGIS.
 
 ## Quadkeys
 
 A cell is identified by `(z, qk)`: `qk` is a `bigint` Morton code with x in the even bits and y in the odd bits, using XYZ tile addressing (y = 0 at the north edge, 0 ≤ z ≤ 30). Out-of-range input raises SQLSTATE `22003`; a quadkey string with a digit outside 0–3 raises `22P02`.
+
+`qk_from_point` clamps rather than wraps: latitudes beyond the Web Mercator limit (±85.0511°) and longitudes outside ±180° map to the edge row or column. A point on a cell boundary belongs to the cell east / south of it.
 
 | Function | Returns |
 | --- | --- |

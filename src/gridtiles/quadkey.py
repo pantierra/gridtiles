@@ -93,7 +93,7 @@ def envelope(z: int, qk: int) -> tuple[float, float, float, float]:
 
 
 def from_lonlat(lon: float, lat: float, z: int) -> int:
-    """Cell containing a WGS84 point; latitude is clamped to the Web Mercator limit."""
+    """Cell containing a WGS84 point; latitude and longitude are clamped to the edge cells, not wrapped."""
     _check_zoom(z)
     lat = math.radians(max(-MAX_LAT, min(MAX_LAT, lat)))
     return _from_mercator(lon * HALF_WORLD / 180, math.log(math.tan(math.pi / 4 + lat / 2)) * HALF_WORLD / math.pi, z)
