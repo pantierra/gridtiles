@@ -1,6 +1,8 @@
 # gridtiles
 
-Turn any point, polygon or raster dataset into a quadkey grid and serve it as zoomable vector tiles.
+**A tile-based discrete global grid system, optimized for visualization.**
+
+Turn any point, polygon or raster dataset into a quadkey grid and serve it as zoomable vector tiles. [Why a quadkey grid?](docs/concept.md)
 
 > [!WARNING]
 > This project is in early development. The API is not stable yet.
