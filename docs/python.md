@@ -39,7 +39,7 @@ spec.model_dump_json()  # JSON accepted by gridtiles.create_layer
 
 `load_points(conn, layer, path, *, lon=None, lat=None, crs="EPSG:4326", rollup=True)` loads a point file into an existing layer, rebuilds the coarser levels and stats unless `rollup=False`, and returns a `LoadReport` (`records_read`, `records_loaded`, `skipped_null_geometry`, `cells_written`). It reads GeoParquet with pyarrow and everything else through GDAL (CSV, GeoJSON, Shapefile, GeoPackage…). For CSV, `lon` / `lat` name the coordinate columns (default: common names such as `lon`, `lat`). `crs` applies when the source declares none. Null and empty points count as `skipped_null_geometry`; non-point geometry raises `UnsupportedGeometry`.
 
-The load and the rollup run in one transaction, so a failing rollup rolls back the load. Each rollup rebuilds every coarser level, so when loading many files pass `rollup=False` and call `gridtiles.rollup(layer)` once at the end.
+The load and the rollup run in one transaction, so a failing rollup rolls back the load. Each rollup rebuilds every coarser level, so when loading many files pass `rollup=False` and call the SQL function once at the end: `conn.execute("select gridtiles.rollup(%s)", (layer,))`.
 
 ```python
 import psycopg
