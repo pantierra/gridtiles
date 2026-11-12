@@ -68,3 +68,4 @@ def test_stats(layer: psycopg.Connection) -> None:
         assert value["min"] <= breaks[0] and breaks[-1] <= value["max"]
     (total,) = layer.execute(f"select sum(population_sum) from gridtiles.cells_minmax where z = {ZB}").fetchone()
     assert stats["population"]["total"] == pytest.approx(total)
+    assert stats["completeness"]["total"] is None and stats["pop_min"]["total"] is None

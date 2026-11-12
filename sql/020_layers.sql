@@ -74,9 +74,9 @@ language sql immutable strict parallel safe as $$
 $$;
 
 -- The tile property of each value as an SQL expression over a cell row.
-create or replace function gridtiles._properties(spec jsonb) returns table (value text, expr text)
+create or replace function gridtiles._properties(spec jsonb) returns table (value text, agg text, expr text)
 language sql immutable strict parallel safe as $$
-    select v->>'name', case v->>'agg'
+    select v->>'name', v->>'agg', case v->>'agg'
         when 'count' then 'n'
         when 'mean' then format('%I / nullif(%I, 0)', v->>'name' || '_sum', v->>'name' || '_w')
         else quote_ident(v->>'name' || '_' || (v->>'agg'))

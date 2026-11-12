@@ -19,13 +19,14 @@ begin
         );
     end loop;
 
-    -- Per value at zb: total, min, max and 7 quantile breakpoints of the tile property.
+    -- Per value at zb: total (count and sum only; a sum of means or extremes means nothing), min, max
+    -- and 7 quantile breakpoints of the tile property.
     for p in select * from gridtiles._properties(l.spec) loop
         execute format(
-            'select jsonb_build_object(''total'', sum(v), ''min'', min(v), ''max'', max(v), ''breaks'',
+            'select jsonb_build_object(''total'', %s, ''min'', min(v), ''max'', max(v), ''breaks'',
                 percentile_cont(array[0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875]) within group (order by v))
              from (select %s as v from %s where z = %s) c',
-            p.expr, cells, l.zb
+            case when p.agg in ('count', 'sum') then 'sum(v)' else 'null' end, p.expr, cells, l.zb
         ) into s;
         layer_stats := layer_stats || jsonb_build_object(p.value, s);
     end loop;
