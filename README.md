@@ -19,7 +19,8 @@ With PostgreSQL + PostGIS running (`make up` starts one on port 5439):
 export GRIDTILES_DB=postgresql://postgres:postgres@localhost:5439/postgres
 gridtiles init
 gridtiles load points.parquet --layer pop --spec spec.json
-gridtiles serve   # open http://localhost:8080
+gridtiles serve                              # open http://localhost:8080
+gridtiles export --layer pop -o site/pop.pmtiles   # static site for any host with range requests
 ```
 
 ## Documentation

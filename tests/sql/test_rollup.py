@@ -3,7 +3,7 @@ import random
 import psycopg
 import pytest
 
-from gridtiles.ingest import load_points
+from gridtiles.backends.postgres import PostgresBackend
 
 from ..conftest import FIXTURES
 from .test_ingest import SPEC_MINMAX, create
@@ -15,7 +15,7 @@ ZB, ZMIN = SPEC_MINMAX["base_zoom"], SPEC_MINMAX["min_zoom"]
 @pytest.fixture
 def layer(db: psycopg.Connection) -> psycopg.Connection:
     create(db, SPEC_MINMAX)
-    load_points(db, "minmax", FIXTURES / "points_10k.parquet")
+    PostgresBackend(db).load("minmax", FIXTURES / "points_10k.parquet")
     return db
 
 

@@ -1,7 +1,7 @@
 import psycopg
 
 import gridtiles
-from gridtiles.db import install
+from gridtiles.backends.postgres import install
 
 
 def test_postgis_version(db: psycopg.Connection) -> None:

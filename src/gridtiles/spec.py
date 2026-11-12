@@ -47,3 +47,7 @@ class LayerSpec(_Model):
         if len(names) != len(set(names)):
             raise ValueError(f"duplicate value names in {names}")
         return self
+
+    def cell_zoom(self, t: int) -> int:
+        """Zoom of the cells a tile at zoom t carries: clamp(t + detail, min_zoom, base_zoom)."""
+        return min(max(t + self.detail, self.min_zoom), self.base_zoom)
