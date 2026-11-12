@@ -9,6 +9,7 @@ import psycopg.conninfo
 import pytest
 
 SQL_DIR = Path(__file__).parent.parent / "sql"
+FIXTURES = Path(__file__).parent / "fixtures"
 TEST_DB = "gridtiles_test"
 ADMIN_DSN = os.environ.get("GRIDTILES_TEST_DSN", "postgresql://postgres:postgres@localhost:5439/postgres")
 
