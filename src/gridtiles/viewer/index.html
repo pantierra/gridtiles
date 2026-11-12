@@ -22,8 +22,8 @@
   <div id="map"></div>
   <div id="panel"><select id="layer" hidden></select><div id="title"></div><div id="legend"></div></div>
   <script>
-    // Sequential palette (ColorBrewer YlGnBu), one colour per class.
     maplibregl.addProtocol("pmtiles", new pmtiles.Protocol().tile);
+    // Sequential palette (ColorBrewer YlGnBu), one colour per class.
     const PALETTE = ["#ffffd9", "#edf8b1", "#c7e9b4", "#7fcdbb", "#41b6c4", "#1d91c0", "#225ea8", "#0c2c84"];
     const map = (window.map = new maplibregl.Map({
       container: "map",
