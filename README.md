@@ -24,6 +24,7 @@ gridtiles serve   # open http://localhost:8080
 
 ## Documentation
 
+- [Concept: a global grid built for rendering](docs/concept.md)
 - [Command line](docs/cli.md)
 - [SQL reference](docs/sql.md)
 - [Python reference](docs/python.md)
