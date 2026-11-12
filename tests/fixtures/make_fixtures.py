@@ -87,6 +87,17 @@ def points_10k() -> None:
     write_geoparquet(HERE / "points_10k.parquet", columns, [None if p is None else point_wkb(*p) for p in points])
 
 
+def dense_block(path: Path) -> None:
+    """One point at the centre of each of the 256 z16 cells of the z12 tile around Berlin Mitte."""
+    parent = mercantile.tile(13.405, 52.52, 12)
+    points, pop = [], []
+    for i, tile in enumerate(mercantile.children(parent, zoom=16)):
+        b = mercantile.bounds(tile)
+        points.append(point_wkb((b.west + b.east) / 2, (b.south + b.north) / 2))
+        pop.append(i)
+    write_geoparquet(path, {"pop": pop, "osm_ratio": [0.5] * 256, "area": [1.0] * 256}, points)
+
+
 if __name__ == "__main__":
     points_small()
     points_10k()
