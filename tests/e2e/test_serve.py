@@ -1,4 +1,4 @@
-"""The v0.1 journey: init -> load -> serve, then Martin over HTTP and the viewer in a browser."""
+"""The journey: init -> import -> add -> serve, then Martin over HTTP and the viewer in a browser."""
 
 import subprocess
 import time
@@ -47,8 +47,8 @@ def journey(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
     url = fresh_database("gridtiles_e2e")
     cli = ["uv", "run", "gridtiles"]
     subprocess.run([*cli, "init", "--db", url], check=True)
-    load = [*cli, "load", str(FIXTURES / "points_10k.parquet"), "--layer", "pop", "--spec", str(FIXTURES / "spec_pop.json")]
-    subprocess.run([*load, "--db", url], check=True)
+    subprocess.run([*cli, "import", str(FIXTURES / "points_10k.parquet"), "--table", "pop_points", "--db", url], check=True)
+    subprocess.run([*cli, "add", "pop", "--spec", str(FIXTURES / "spec_pop.json"), "--db", url], check=True)
     build = tmp_path_factory.mktemp("build")
     serve = [
         *cli,
@@ -99,6 +99,25 @@ def test_tile_over_http_matches_sql(journey: str) -> None:
 
 def test_empty_tile_is_204(journey: str) -> None:
     assert get(f"http://localhost:{MARTIN_PORT}/tile_pop/12/0/0")[0] == 204
+
+
+def test_query_parameters_reach_the_tile_function(journey: str) -> None:
+    plain = get(f"http://localhost:{MARTIN_PORT}/tile_pop/12/{BLOCK.x}/{BLOCK.y}")
+    assert get(f"http://localhost:{MARTIN_PORT}/tile_pop/12/{BLOCK.x}/{BLOCK.y}?unknown=1") == plain
+
+
+def test_writes_show_without_restart(journey: str) -> None:
+    """Martin's tile cache is off: a committed write to the source shows on the next request."""
+    url = f"http://localhost:{MARTIN_PORT}/tile_pop/12/2048/2047"  # just north-east of (0, 0)
+    assert get(url)[0] == 204
+    with psycopg.connect(journey, autocommit=True) as conn:
+        conn.execute("insert into pop_points (geom, pop) values ('SRID=4326;POINT(0.01 0.01)', 7)")
+        try:
+            status, body = get(url)
+            assert status == 200 and len(body) > 0
+        finally:
+            conn.execute("delete from pop_points where pop = 7 and ST_X(geom) = 0.01")
+    assert get(url)[0] == 204
 
 
 def test_viewer_renders_cells(page: Page) -> None:

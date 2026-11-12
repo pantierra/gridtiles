@@ -17,8 +17,7 @@ from pydantic import ValidationError
 
 from gridtiles import db, martin, viewer
 from gridtiles.export import export_pmtiles
-from gridtiles.ingest import MAX_CELLS_PER_FEATURE, CellLimitExceeded
-from gridtiles.ingest import load as load_source
+from gridtiles.importer import import_file
 from gridtiles.spec import LayerSpec
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, help="Quadkey grids served as zoomable vector tiles.")
@@ -47,21 +46,32 @@ def _db_url(flag: str | None, settings: dict[str, Any]) -> str:
     return url or _fail("No database: pass --db, set [backend] url in gridtiles.toml or $GRIDTILES_DB.")
 
 
-def _layer_spec(layer: str, spec_file: Path | None, settings: dict[str, Any]) -> LayerSpec:
-    """The spec of a new layer, from a JSON file or from [grid] and [[value]] in gridtiles.toml."""
+def _layer_spec(layer: str, spec_file: Path | None, settings: dict[str, Any], source: dict[str, str]) -> LayerSpec:
+    """The spec of a new layer, from a JSON file or from [grid], [source] and [[value]] in
+    gridtiles.toml; `source` (from flags) overrides the spec's source keys.
+    """
     if spec_file:
         try:
             data = json.loads(spec_file.read_text())
         except (OSError, json.JSONDecodeError) as e:
             _fail(f"Cannot read layer spec {spec_file}: {e}")
     elif "grid" in settings:
-        data = {**settings["grid"], "values": settings.get("value", [])}
+        data = {**settings["grid"], "source": settings.get("source", {}), "values": settings.get("value", [])}
     else:
-        _fail(f"Layer {layer!r} does not exist: pass --spec or a gridtiles.toml with [grid] and [[value]].")
+        _fail("No layer spec: pass --spec or a gridtiles.toml with [grid] and [[value]].")
+    if isinstance(data, dict) and source:
+        data["source"] = {**(data.get("source") or {}), **source}
     try:
         return LayerSpec.model_validate({**data, "name": layer})
     except ValidationError as e:
         _fail(f"Invalid layer spec:\n{e}")
+
+
+def _connect(url: str) -> psycopg.Connection:
+    """A connection that prints server warnings (e.g. a missing index) to stderr."""
+    conn = psycopg.connect(url)
+    conn.add_notice_handler(lambda d: typer.echo(f"{d.severity}: {d.message_primary}", err=True))
+    return conn
 
 
 @app.command()
@@ -71,40 +81,66 @@ def init(db_url: Db = None, config: Config = None) -> None:
         typer.echo(f"gridtiles schema {db.install(conn)} installed")
 
 
-@app.command()
-def load(
+@app.command("import")
+def import_(
     src: Path,
-    layer: Annotated[str, typer.Option(help="Layer name; created if absent")],
-    spec: Annotated[Path | None, typer.Option(help="Layer spec JSON for a new layer")] = None,
-    force: Annotated[
-        bool, typer.Option(help=f"Allow polygons spanning more than {MAX_CELLS_PER_FEATURE:,} base cells")
-    ] = False,
+    table: Annotated[str, typer.Option(help="Table to create, NAME or SCHEMA.NAME")],
+    replace: Annotated[bool, typer.Option(help="Drop and recreate the table if it exists")] = False,
+    append: Annotated[bool, typer.Option(help="Add the rows to an existing table")] = False,
     db_url: Db = None,
     config: Config = None,
 ) -> None:
-    """Load points, polygons or a raster into a layer and roll it up."""
-    settings = _settings(config)
-    with psycopg.connect(_db_url(db_url, settings)) as conn:
+    """Import a point, polygon or raster file into a plain table with a geometry column."""
+    if replace and append:
+        _fail("Pass --replace or --append, not both.")
+    with _connect(_db_url(db_url, _settings(config))) as conn:
         try:
-            db.layer_spec(conn, layer)
-        except LookupError:
-            db.create_layer(conn, _layer_spec(layer, spec, settings))
-        try:
-            report = load_source(conn, layer, src, max_cells_per_feature=None if force else MAX_CELLS_PER_FEATURE)
-        except CellLimitExceeded as e:
-            _fail(f"{e} (use --force)")
-        except ValueError as e:  # UnsupportedGeometry, raster CRS or pixel size, source columns
+            report = import_file(conn, src, table, mode="replace" if replace else "append" if append else "create")
+        except (ValueError, OSError) as e:  # UnsupportedGeometry, CRS, an existing table
             _fail(str(e))
         typer.echo(report)
 
 
+@app.command()
+def add(
+    layer: str,
+    source: Annotated[str | None, typer.Option(help="Source table [default: from the spec]")] = None,
+    geometry: Annotated[str | None, typer.Option(help="Geometry column [default: from the spec, then geom]")] = None,
+    spec: Annotated[Path | None, typer.Option(help="Layer spec JSON [default: gridtiles.toml]")] = None,
+    db_url: Db = None,
+    config: Config = None,
+) -> None:
+    """Register a layer: a live grid over a source table."""
+    settings = _settings(config)
+    overrides = {k: v for k, v in {"table": source, "geometry": geometry}.items() if v is not None}
+    layer_spec = _layer_spec(layer, spec, settings, overrides)
+    with _connect(_db_url(db_url, settings)) as conn:
+        try:
+            db.create_layer(conn, layer_spec)
+        except psycopg.errors.UniqueViolation:
+            _fail(f"Layer {layer!r} exists.")
+        except psycopg.Error as e:  # the source is missing, untyped or has the wrong column types
+            _fail(f"Cannot add layer {layer!r}: {e.diag.message_primary}")
+    typer.echo(f"Added layer {layer} over {layer_spec.source.table}")
+
+
+@app.command()
+def drop(layer: str, db_url: Db = None, config: Config = None) -> None:
+    """Unregister a layer; its source table stays."""
+    with _connect(_db_url(db_url, _settings(config))) as conn:
+        try:
+            db.drop_layer(conn, layer)
+        except psycopg.errors.UndefinedObject:
+            _fail(f"Layer {layer!r} does not exist.")
+
+
 @app.command("layers")
 def list_layers(db_url: Db = None, config: Config = None) -> None:
-    """List layers with their zooms and cell counts."""
+    """List layers with their source, zooms and published tile zooms."""
     with psycopg.connect(_db_url(db_url, _settings(config))) as conn:
         for layer in db.layers(conn):
             s, (t0, t1) = layer.spec, layer.tile_zooms
-            typer.echo(f"{s.name}\tz{s.min_zoom}-{s.base_zoom}\tdetail {s.detail}\ttiles z{t0}-{t1}\t{layer.cells} cells")
+            typer.echo(f"{s.name}\t{s.source.table}\tz{s.min_zoom}-{s.base_zoom}\tdetail {s.detail}\ttiles z{t0}-{t1}")
 
 
 @app.command()
@@ -135,9 +171,9 @@ def serve(
     """Serve live tiles with Martin and the viewer, until interrupted."""
     url = _db_url(db_url, _settings(config))
     with psycopg.connect(url) as conn:
-        layers = db.layers(conn, layer)
+        layers = db.layers(conn, layer, stats=True)
     if not layers:
-        _fail("No layers to serve: load one first.")
+        _fail("No layers to serve: add one first.")
     config_path = martin.write_config(build / "martin.yaml", url, layers, martin_port)
     site = viewer.write(build / "viewer", layers, lambda lay: martin.tile_url(lay, martin_port))
 

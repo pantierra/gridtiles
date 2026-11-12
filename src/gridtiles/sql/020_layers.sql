@@ -1,104 +1,62 @@
--- Layer registry and per-layer cell tables. Spec checks mirror src/gridtiles/spec.py;
--- an invalid spec raises SQLSTATE 22023.
+-- Layer registry: a layer is a named view over a source relation with a geometry column. Nothing
+-- is copied; tiles aggregate the source on request (040_mvt.sql). Spec checks mirror
+-- src/gridtiles/spec.py; an invalid spec raises SQLSTATE 22023.
+
+-- Databases installed before live aggregation hold a materialized registry (cell tables, rollup).
+-- Its objects are dropped on upgrade; registered layers would lose their cells, so they must be
+-- dropped by the user first.
+do $$
+begin
+    if exists (select from information_schema.columns
+               where table_schema = 'gridtiles' and table_name = 'layers' and column_name = 'cells') then
+        if exists (select from gridtiles.layers) then
+            raise exception 'gridtiles.layers holds materialized layers (%): drop them with gridtiles.drop_layer before upgrading',
+                (select string_agg(name, ', ' order by name) from gridtiles.layers) using errcode = '55000';
+        end if;
+        drop function if exists gridtiles.ingest_points(text, regclass), gridtiles.ingest_polygons(text, regclass, bigint),
+            gridtiles.rollup(text), gridtiles._insert_cells(gridtiles.layers, text, text),
+            gridtiles._bbox_tile_range(geometry, int), gridtiles._mercator_polygon(geometry),
+            gridtiles._columns(jsonb), gridtiles._merge(text, text, text), gridtiles._column_list(jsonb),
+            gridtiles._aggregates(jsonb, text, text), gridtiles._merge_set(jsonb, text, text),
+            gridtiles._merge_aggregates(jsonb), gridtiles._properties(jsonb),
+            gridtiles._mvt_query(text, int, int, int), gridtiles.mvt(text, int, int, int);
+        drop table gridtiles.layers;
+    end if;
+end $$;
 
 create table if not exists gridtiles.layers (
     name text primary key check (name ~ '^[a-z][a-z0-9_]{0,47}$'),
     spec jsonb not null,
+    source text not null,  -- quoted, schema-qualified relation name; resolved on every request
+    geometry text not null,
+    srid int not null,
+    kind text not null check (kind in ('point', 'polygon')),
     zb smallint not null,
     zmin smallint not null,
     detail smallint not null,
-    stats jsonb,
-    cells bigint,  -- rows over all zooms, set by rollup
-    bounds double precision[],  -- [west, south, east, north] in WGS84 of the cells at zb, set by rollup
-    created_at timestamptz not null default now(),
-    updated_at timestamptz not null default now()
+    created_at timestamptz not null default now()
 );
-
--- Stored columns per value, in table order: the single source for every function that writes or
--- reads cell values. `i` is the column position; `part` is 'value' or 'weight' (the mean's weight
--- sidecar); `merge` is the aggregate that combines partial results of the column (see _merge).
-create or replace function gridtiles._columns(spec jsonb)
-returns table (value text, agg text, col text, merge text, part text, src text, weight text, i bigint)
-language sql immutable strict parallel safe as $$
-    select v->>'name', v->>'agg', v->>'name' || c.suffix, c.merge, c.part, v->>'from', v->>'weight',
-        row_number() over (order by e.i, c.pos)
-    from jsonb_array_elements(spec->'values') with ordinality as e(v, i)
-    join (values
-        ('sum', '_sum', 'sum', 'value', 1), ('min', '_min', 'min', 'value', 1), ('max', '_max', 'max', 'value', 1),
-        ('mean', '_sum', 'sum', 'value', 1), ('mean', '_w', 'sum', 'weight', 2)
-    ) as c(agg, suffix, merge, part, pos) on c.agg = v->>'agg'
-    order by e.i, c.pos
-$$;
-
--- SQL expression merging two partial aggregates a and b (NULL means "no data").
-create or replace function gridtiles._merge(merge text, a text, b text) returns text
-language sql immutable strict parallel safe as $$
-    select case merge
-        when 'sum' then format('coalesce(%1$s + %2$s, %1$s, %2$s)', a, b)
-        when 'min' then format('least(%s, %s)', a, b)
-        when 'max' then format('greatest(%s, %s)', a, b)
-    end
-$$;
-
--- Comma-led list of a layer's value columns, e.g. ", population_sum, completeness_w".
-create or replace function gridtiles._column_list(spec jsonb) returns text
-language sql immutable strict parallel safe as $$
-    select coalesce(string_agg(', ' || quote_ident(col), '' order by i), '')
-    from gridtiles._columns(spec) c
-$$;
-
--- Comma-led aggregates turning source records into value columns. A record adds `share` (an SQL
--- expression: 1 for points, the covered fraction for polygons) of its value to sums, and weighs
--- its value by `area` (1 for points, the covered area for polygons) in means. min/max ignore both.
-create or replace function gridtiles._aggregates(spec jsonb, share text default '1', area text default '1') returns text
-language sql immutable strict parallel safe as $$
-    select coalesce(string_agg(', ' || case
-        when c.part = 'weight' then format('sum(case when %I is not null then %s * %s end)', c.src, w, area)
-        when c.agg = 'mean' then format('sum(%I * %s * %s)', c.src, w, area)
-        when c.agg = 'sum' then format('sum(%I * %s)', c.src, share)
-        else format('%s(%I)', c.merge, c.src)
-    end, '' order by c.i), '')
-    from gridtiles._columns(spec) c,
-        lateral (select coalesce(quote_ident(c.weight), '1')) x(w)
-$$;
-
--- Comma-led "col = merge(a.col, b.col)" assignments, e.g. for ON CONFLICT DO UPDATE.
-create or replace function gridtiles._merge_set(spec jsonb, a text, b text) returns text
-language sql immutable strict parallel safe as $$
-    select coalesce(string_agg(format(', %I = %s', col,
-        gridtiles._merge(merge, a || '.' || quote_ident(col), b || '.' || quote_ident(col))), '' order by i), '')
-    from gridtiles._columns(spec) c
-$$;
-
--- Comma-led aggregates combining child cells into their parent (one merge per stored column).
--- Sums run in quadkey order so float results are reproducible bit for bit.
-create or replace function gridtiles._merge_aggregates(spec jsonb) returns text
-language sql immutable strict parallel safe as $$
-    select coalesce(string_agg(format(', %s(%I%s)', merge, col, case merge when 'sum' then ' order by qk' else '' end),
-        '' order by i), '')
-    from gridtiles._columns(spec) c
-$$;
-
--- The tile property of each value as an SQL expression over a cell row.
-create or replace function gridtiles._properties(spec jsonb) returns table (value text, agg text, expr text)
-language sql immutable strict parallel safe as $$
-    select v->>'name', v->>'agg', case v->>'agg'
-        when 'count' then 'n'
-        when 'mean' then format('%I / nullif(%I, 0)', v->>'name' || '_sum', v->>'name' || '_w')
-        else quote_ident(v->>'name' || '_' || (v->>'agg'))
-    end
-    from jsonb_array_elements(spec->'values') with ordinality as e(v, i)
-    order by e.i
-$$;
 
 create or replace function gridtiles._check_spec(spec jsonb) returns void
 language plpgsql immutable parallel safe as $$
 declare
     k text;
     v jsonb;
+    src jsonb := spec->'source';
 begin
     if coalesce(spec->>'name', '') !~ '^[a-z][a-z0-9_]{0,47}$' then
         raise exception 'layer name % must match ^[a-z][a-z0-9_]{0,47}$', spec->'name' using errcode = '22023';
+    end if;
+    if jsonb_typeof(src) is distinct from 'object' or jsonb_typeof(src->'table') is distinct from 'string' then
+        raise exception 'source must be an object with a table name' using errcode = '22023';
+    elsif src->'geometry' is not null and jsonb_typeof(src->'geometry') <> 'string' then
+        raise exception 'source.geometry must be a column name' using errcode = '22023';
+    elsif src->'kind' is not null and src->>'kind' not in ('point', 'polygon') then
+        raise exception 'source.kind % not one of point, polygon', src->'kind' using errcode = '22023';
+    elsif src->'srid' is not null and coalesce(src->>'srid', '') !~ '^[1-9]\d{0,8}$' then
+        raise exception 'source.srid must be a positive integer, got %', src->'srid' using errcode = '22023';
+    elsif exists (select from jsonb_object_keys(src) o(key) where o.key not in ('table', 'geometry', 'kind', 'srid')) then
+        raise exception 'source has unknown keys' using errcode = '22023';
     end if;
     -- Checked before any ::int cast, which would raise 22P02 instead of 22023; detail is optional.
     foreach k in array array['base_zoom', 'min_zoom', 'detail'] loop
@@ -133,25 +91,115 @@ begin
     end if;
 end $$;
 
+-- The columns a layer reads from its source: each value's `from` and `weight` (count reads none).
+-- `alias` is the name the tile query gives the column after casting it to double precision.
+create or replace function gridtiles._sources(spec jsonb) returns table (col text, alias text)
+language sql immutable strict parallel safe as $$
+    select col, '_s' || row_number() over (order by min(i), col)
+    from jsonb_array_elements(spec->'values') with ordinality e(v, i),
+        lateral (values (v->>'from'), (v->>'weight')) s(col)
+    where v->>'agg' <> 'count' and col is not null
+    group by col
+$$;
+
 create or replace function gridtiles.create_layer(spec jsonb) returns void
 language plpgsql as $$
+#variable_conflict use_variable
 declare
     name text := spec->>'name';
+    rel regclass;
+    relkind char;
+    qualified text;
+    geom text := coalesce(spec#>>'{source,geometry}', 'geom');
+    att record;
+    srid int;
+    kind text;
+    s record;
 begin
     perform gridtiles._check_spec(spec);
-    insert into gridtiles.layers (name, spec, zb, zmin, detail)
-    values (name, spec, (spec->>'base_zoom')::int, (spec->>'min_zoom')::int, coalesce((spec->>'detail')::int, 4));
+    rel := to_regclass(spec#>>'{source,table}');
+    if rel is null then
+        raise exception 'source table % does not exist', spec#>'{source,table}' using errcode = '42P01';
+    end if;
+    select format('%I.%I', n.nspname, c.relname), c.relkind into qualified, relkind
+    from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = rel;
+
+    select atttypid, atttypmod into att from pg_attribute
+    where attrelid = rel and attname = geom and attnum > 0 and not attisdropped;
+    if not found then
+        raise exception 'source % has no column %', qualified, geom using errcode = '42703';
+    elsif att.atttypid <> 'geometry'::regtype then
+        raise exception 'source column %.% is %, not geometry', qualified, geom, format_type(att.atttypid, att.atttypmod)
+            using errcode = '42804';
+    end if;
+
+    -- SRID and kind come from the column's type modifier, or from the spec for an untyped column.
+    srid := nullif(postgis_typmod_srid(att.atttypmod), 0);
+    if srid is not null and (spec#>>'{source,srid}')::int is distinct from null and (spec#>>'{source,srid}')::int <> srid then
+        raise exception 'source.srid % differs from the SRID % of %.%', spec#>'{source,srid}', srid, qualified, geom
+            using errcode = '22023';
+    end if;
+    srid := coalesce(srid, (spec#>>'{source,srid}')::int);
+    if srid is null then
+        raise exception 'column %.% has no SRID constraint: set source.srid', qualified, geom using errcode = '22023';
+    elsif not exists (select from spatial_ref_sys r where r.srid = srid) then
+        raise exception 'SRID % is not in spatial_ref_sys', srid using errcode = '22023';
+    end if;
+    kind := case regexp_replace(postgis_typmod_type(att.atttypmod), '(ZM|Z|M)$', '')
+        when 'Point' then 'point' when 'Polygon' then 'polygon' when 'MultiPolygon' then 'polygon'
+        when 'Geometry' then spec#>>'{source,kind}'
+    end;
+    if kind is null and postgis_typmod_type(att.atttypmod) <> 'Geometry' then
+        raise exception 'column %.% holds %; only points and polygons are supported', qualified, geom,
+            postgis_typmod_type(att.atttypmod) using errcode = '0A000';
+    elsif kind is null then
+        raise exception 'column %.% has no geometry type constraint: set source.kind', qualified, geom
+            using errcode = '22023';
+    elsif spec#>>'{source,kind}' is distinct from null and spec#>>'{source,kind}' <> kind then
+        raise exception 'source.kind % differs from the % column %.%', spec#>'{source,kind}', kind, qualified, geom
+            using errcode = '22023';
+    elsif kind = 'polygon' then
+        raise exception 'polygon sources are not supported yet' using errcode = '0A000';
+    end if;
+
+    for s in select * from gridtiles._sources(spec) loop
+        select atttypid, atttypmod into att from pg_attribute
+        where attrelid = rel and attname = s.col and attnum > 0 and not attisdropped;
+        if not found then
+            raise exception 'source % has no column %', qualified, s.col using errcode = '42703';
+        elsif (select typcategory from pg_type where oid = att.atttypid) <> 'N' then
+            raise exception 'source column %.% is %, not numeric', qualified, s.col, format_type(att.atttypid, att.atttypmod)
+                using errcode = '42804';
+        end if;
+    end loop;
+
+    -- Tiles filter on the geometry (EPSG:4326 and 3857) or on its transform to 4326 (any other SRID).
+    if relkind in ('r', 'p', 'm') and not exists (
+        select from pg_index i join pg_class ic on ic.oid = i.indexrelid join pg_am am on am.oid = ic.relam
+        where i.indrelid = rel and am.amname = 'gist' and (
+            (srid in (3857, 4326) and i.indexprs is null
+             and (select attnum from pg_attribute where attrelid = rel and attname = geom) = any(i.indkey::int2[]))
+            or (srid not in (3857, 4326) and pg_get_indexdef(i.indexrelid) ilike '%st_transform(%' || geom || '%4326)%'))
+    ) then
+        raise warning 'source % has no GiST index for tiles: create index on % using gist (%)', qualified, qualified,
+            case when srid in (3857, 4326) then quote_ident(geom) else format('ST_Transform(%I, 4326)', geom) end;
+    end if;
+
+    insert into gridtiles.layers (name, spec, source, geometry, srid, kind, zb, zmin, detail)
+    values (name, spec, qualified, geom, srid, kind, (spec->>'base_zoom')::int, (spec->>'min_zoom')::int,
+            coalesce((spec->>'detail')::int, 4));
+    -- Tile server entry point (Martin function source, which passes the URL query as query_params).
+    -- A malformed parameter (SQLSTATE 22023) gives an empty tile and a logged warning, not an error.
     execute format(
-        'create table gridtiles.%I (z smallint, qk bigint, n bigint not null%s, primary key (z, qk))',
-        'cells_' || name,
-        (select coalesce(string_agg(format(', %I double precision', col), '' order by i), '')
-         from gridtiles._columns(spec) c)
-    );
-    -- Tile server entry point (Martin function source); gridtiles.mvt is defined in 040_mvt.sql.
-    execute format(
-        'create function gridtiles.%I(z integer, x integer, y integer) returns bytea
-         language sql stable parallel safe as $f$ select gridtiles.mvt(%L, z, x, y) $f$',
-        'tile_' || name, name
+        'create function gridtiles.%I(z integer, x integer, y integer, query_params json) returns bytea
+         language plpgsql stable as $f$
+         begin
+             return gridtiles.mvt(%L, z, x, y, coalesce(query_params::jsonb, %L));
+         exception when invalid_parameter_value then
+             raise warning %L, sqlerrm;
+             return %L::bytea;
+         end $f$',
+        'tile_' || name, name, '{}', 'tile_' || name || ': %', ''
     );
 end $$;
 
@@ -162,6 +210,5 @@ begin
     if not found then
         raise exception 'layer % does not exist', name using errcode = '42704';
     end if;
-    execute format('drop table gridtiles.%I', 'cells_' || name);
-    execute format('drop function gridtiles.%I(integer, integer, integer)', 'tile_' || name);
+    execute format('drop function gridtiles.%I(integer, integer, integer, json)', 'tile_' || name);
 end $$;

@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+import psycopg
 import pytest
 from typer.testing import CliRunner
 
@@ -15,6 +16,7 @@ runner = CliRunner()
 def url() -> str:
     url = fresh_database("gridtiles_cli")
     assert run("init", "--db", url).exit_code == 0
+    assert run("import", FIXTURES / "points_10k.parquet", "--table", "pop_points", "--db", url).exit_code == 0
     return url
 
 
@@ -25,41 +27,75 @@ def run(*args: str | Path):
 def test_help_lists_commands() -> None:
     result = run("--help")
     assert result.exit_code == 0
-    for command in ("init", "load", "layers", "serve"):
+    for command in ("init", "import", "add", "drop", "layers", "serve", "export"):
         assert command in result.output
+    assert "load" not in result.output
 
 
 def test_init_again(url: str) -> None:
     assert run("init", "--db", url).exit_code == 0
 
 
-def test_load_and_list(url: str) -> None:
-    result = run(
-        "load", FIXTURES / "points_10k.parquet", "--layer", "pop", "--spec", FIXTURES / "spec_pop.json", "--db", url
-    )
+def test_import_report(url: str) -> None:
+    result = run("import", FIXTURES / "points_small.csv", "--table", "small", "--db", url)
     assert result.exit_code == 0, result.output
-    assert "LoadReport(records_read=10000, records_loaded=9800" in result.output
+    assert "ImportReport(records_read=8, records_imported=8" in result.output
+    again = run("import", FIXTURES / "points_small.csv", "--table", "small", "--db", url)
+    assert again.exit_code == 2 and "exists" in again.output
+    assert run("import", FIXTURES / "points_small.csv", "--table", "small", "--append", "--db", url).exit_code == 0
+    assert run("import", FIXTURES / "points_small.csv", "--table", "small", "--replace", "--db", url).exit_code == 0
+    both = run("import", FIXTURES / "points_small.csv", "--table", "small", "--replace", "--append", "--db", url)
+    assert both.exit_code == 2
+
+
+def test_add_list_drop(url: str) -> None:
+    result = run("add", "pop", "--spec", FIXTURES / "spec_pop.json", "--db", url)
+    assert result.exit_code == 0, result.output
     listing = run("layers", "--db", url)
     assert listing.exit_code == 0
-    assert listing.output.startswith("pop\tz2-16\tdetail 4\ttiles z0-12\t")
+    assert listing.output == "pop\tpop_points\tz2-16\tdetail 4\ttiles z0-12\n"
+    assert run("add", "pop", "--spec", FIXTURES / "spec_pop.json", "--db", url).exit_code == 2
+    assert run("drop", "pop", "--db", url).exit_code == 0
+    assert run("drop", "pop", "--db", url).exit_code == 2
+    with psycopg.connect(url) as conn:
+        assert conn.execute("select count(*) from pop_points").fetchone() == (9800,)
 
 
-def test_load_from_toml(url: str, tmp_path: Path) -> None:
+def test_add_with_source_flags(url: str, tmp_path: Path) -> None:
+    with psycopg.connect(url) as conn:
+        conn.execute("create table if not exists renamed as select geom as shape, pop from pop_points")
+        conn.execute("create index if not exists renamed_shape on renamed using gist (shape)")
+    spec = tmp_path / "spec.json"
+    spec.write_text(json.dumps({"base_zoom": 14, "min_zoom": 4, "values": [{"name": "p", "from": "pop", "agg": "sum"}]}))
+    result = run("add", "flags", "--source", "renamed", "--geometry", "shape", "--spec", spec, "--db", url)
+    assert result.exit_code == 0, result.output
+    assert "WARNING" not in result.output
+
+
+def test_add_from_toml(url: str, tmp_path: Path) -> None:
     config = tmp_path / "gridtiles.toml"
     config.write_text(
-        f'[backend]\nurl = "{url}"\n\n[grid]\nbase_zoom = 14\nmin_zoom = 4\n\n'
+        f'[backend]\nurl = "{url}"\n\n[source]\ntable = "pop_points"\n\n[grid]\nbase_zoom = 14\nmin_zoom = 4\n\n'
         '[[value]]\nname = "population"\nfrom = "pop"\nagg = "sum"\n'
     )
-    result = run("load", FIXTURES / "points_small.csv", "--layer", "small", "--config", config)
+    result = run("add", "small", "--config", config)
     assert result.exit_code == 0, result.output
-    assert "records_loaded=8" in result.output
+    assert "Added layer small over pop_points" in result.output
+
+
+def test_add_warns_without_index(url: str) -> None:
+    with psycopg.connect(url) as conn:
+        conn.execute("create table if not exists unindexed as select * from pop_points")
+    result = run("add", "unindexed", "--source", "unindexed", "--spec", FIXTURES / "spec_pop.json", "--db", url)
+    assert result.exit_code == 0
+    assert "WARNING: source public.unindexed has no GiST index" in result.output
 
 
 @pytest.mark.parametrize("path", sorted((FIXTURES / "invalid_specs").glob("*.json")), ids=lambda p: p.stem)
 def test_invalid_spec_exits_2(url: str, path: Path) -> None:
     name = json.loads(path.read_text())["name"]
-    layer = name if name != "pop" else f"bad_{path.stem}"  # --layer sets the name: carry an invalid one over
-    result = run("load", FIXTURES / "points_small.csv", "--layer", layer, "--spec", path, "--db", url)
+    layer = name if name != "pop" else f"bad_{path.stem}"  # the argument sets the name: carry an invalid one over
+    result = run("add", layer, "--spec", path, "--db", url)
     assert result.exit_code == 2
     assert "Invalid layer spec" in result.output
 
@@ -69,19 +105,24 @@ def test_unreadable_spec_exits_2(url: str, tmp_path: Path, content: str | None) 
     path = tmp_path / "spec.json"
     if content is not None:
         path.write_text(content)
-    result = run("load", FIXTURES / "points_small.csv", "--layer", "unread", "--spec", path, "--db", url)
+    result = run("add", "unread", "--spec", path, "--db", url)
     assert result.exit_code == 2
     assert "Cannot read layer spec" in result.output
 
 
-def test_raster_error_exits_2(url: str, tmp_path: Path) -> None:
-    spec = tmp_path / "raster.json"
-    spec.write_text(
-        json.dumps({"name": "x", "base_zoom": 23, "min_zoom": 12, "values": [{"name": "v", "from": "value", "agg": "sum"}]})
-    )
-    result = run("load", FIXTURES / "raster_100.tif", "--layer", "fine_raster", "--spec", spec, "--db", url)
+def test_bad_source_exits_2(url: str) -> None:
+    result = run("add", "nosource", "--source", "missing", "--spec", FIXTURES / "spec_pop.json", "--db", url)
     assert result.exit_code == 2
-    assert "base_zoom" in result.output
+    assert 'source table "missing" does not exist' in result.output
+
+
+def test_unsupported_geometry_exits_2(url: str, tmp_path: Path) -> None:
+    path = tmp_path / "line.geojson"
+    line = {"type": "Feature", "properties": {}, "geometry": {"type": "LineString", "coordinates": [[0, 0], [1, 1]]}}
+    path.write_text(json.dumps({"type": "FeatureCollection", "features": [line]}))
+    result = run("import", path, "--table", "lines", "--db", url)
+    assert result.exit_code == 2
+    assert "only points and polygons" in result.output
 
 
 def test_missing_database_exits_2(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

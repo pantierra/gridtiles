@@ -11,9 +11,12 @@ IMAGE = "ghcr.io/maplibre/martin:1.16.0"
 
 
 def config(db_url: str, layers: list[Layer], port: int) -> dict[str, Any]:
-    """One function source per layer, serving the published tile zoom range."""
+    """One function source per layer, serving the published tile zoom range. Tiles are computed from
+    the source on every request, so Martin's tile cache is off: a cached tile would go stale.
+    """
     return {
         "listen_addresses": f"127.0.0.1:{port}",
+        "cache_size_mb": 0,
         "postgres": {
             "connection_string": db_url,
             "auto_publish": False,

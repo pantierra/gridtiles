@@ -3,7 +3,6 @@
 import gzip
 import math
 import threading
-from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from itertools import batched
 from os import PathLike
@@ -13,7 +12,6 @@ from typing import Self
 import psycopg
 from pmtiles.tile import Compression, TileType, zxy_to_tileid
 from pmtiles.writer import Writer
-from psycopg import sql
 from psycopg.conninfo import make_conninfo
 
 from gridtiles import __version__, db, viewer
@@ -34,12 +32,14 @@ def manifest(layer: Layer) -> dict[str, object]:
 
 def export_pmtiles(conn: psycopg.Connection, layer: str, out_path: str | PathLike[str], *, workers: int = 4) -> Path:
     """Write every tile with data in the published zoom range to a PMTiles archive (gzip-compressed
-    MVT), with `index.html` and `config.json` next to it. Exports of the same data are identical.
+    MVT), with `index.html` and `config.json` next to it: a snapshot of the source at export time.
+    Exports of the same data are identical.
     """
-    (info,) = db.layers(conn, [layer])
+    (info,) = db.layers(conn, [layer], stats=True)
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    tiles = sorted(_tiles_with_data(conn, info), key=lambda t: zxy_to_tileid(*t))
+    rows = conn.execute("select z, x, y from gridtiles.tiles_with_data(%s)", (layer,)).fetchall()
+    tiles = sorted(rows, key=lambda t: zxy_to_tileid(*t))
     with open(out, "wb") as f, _TileFetcher(conn, layer) as fetch, ThreadPoolExecutor(workers) as pool:
         writer = Writer(f)
         # map() yields batches in order, so tiles are written clustered while workers fetch ahead.
@@ -71,18 +71,6 @@ def export_pmtiles(conn: psycopg.Connection, layer: str, out_path: str | PathLik
         )
     viewer.write(out.parent, [info], lambda _: out.name)
     return out
-
-
-def _tiles_with_data(conn: psycopg.Connection, layer: Layer) -> Iterator[tuple[int, int, int]]:
-    """(z, x, y) of every tile with data: the distinct ancestors at zoom t of the cells at c(t)."""
-    spec, table = layer.spec, sql.Identifier("gridtiles", f"cells_{layer.name}")
-    for t in range(layer.tile_zooms[0], layer.tile_zooms[1] + 1):
-        c = min(max(t + spec.detail, spec.min_zoom), spec.base_zoom)
-        query = sql.SQL(
-            "select xy.x, xy.y from (select distinct qk >> %(shift)s as tile from {} where z = %(c)s) d,"
-            " gridtiles.qk_to_xy(%(t)s, tile) xy"
-        ).format(table)
-        yield from ((t, x, y) for x, y in conn.execute(query, {"shift": 2 * (c - t), "c": c, "t": t}))
 
 
 class _TileFetcher:

@@ -23,7 +23,13 @@ def install(conn: psycopg.Connection) -> str:
 
 
 def create_layer(conn: psycopg.Connection, spec: LayerSpec) -> None:
+    """Register a layer over its source table; checks the source (see `gridtiles.create_layer`)."""
     conn.execute("select gridtiles.create_layer(%s)", (Jsonb(spec.model_dump(mode="json", exclude_none=True)),))
+
+
+def drop_layer(conn: psycopg.Connection, name: str) -> None:
+    """Unregister a layer; its source table is left alone."""
+    conn.execute("select gridtiles.drop_layer(%s)", (name,))
 
 
 def layer_spec(conn: psycopg.Connection, name: str) -> LayerSpec:
@@ -33,14 +39,19 @@ def layer_spec(conn: psycopg.Connection, name: str) -> LayerSpec:
     return LayerSpec.model_validate(row[0])
 
 
-def layers(conn: psycopg.Connection, names: list[str] | None = None) -> list[Layer]:
-    """Registered layers, all or the named ones."""
+def layers(conn: psycopg.Connection, names: list[str] | None = None, *, stats: bool = False) -> list[Layer]:
+    """Registered layers, all or the named ones. With `stats`, each one's stats and bounds are
+    computed from its source, which aggregates the whole source.
+    """
     rows = conn.execute(
-        "select spec, stats, cells, bounds from gridtiles.layers"
+        "select spec, case when %(stats)s then gridtiles.stats(name) end from gridtiles.layers"
         " where %(names)s::text[] is null or name = any(%(names)s) order by name",
-        {"names": names},
+        {"names": names, "stats": stats},
     ).fetchall()
-    found = [Layer(LayerSpec.model_validate(spec), stats, cells, tuple(b) if b else None) for spec, stats, cells, b in rows]
+    found = [
+        Layer(LayerSpec.model_validate(spec), s and s["stats"], tuple(s["bounds"]) if s and s["bounds"] else None)
+        for spec, s in rows
+    ]
     missing = set(names or []) - {layer.name for layer in found}
     if missing:
         raise LookupError(f"unknown layers: {', '.join(sorted(missing))}")
