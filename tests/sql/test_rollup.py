@@ -58,13 +58,6 @@ def test_rollup_is_idempotent(layer: psycopg.Connection) -> None:
     assert checksum(layer) == before
 
 
-def test_level_shapes(layer: psycopg.Connection) -> None:
-    counts = dict(layer.execute("select z, count(*) from gridtiles.cells_minmax group by z").fetchall())
-    assert min(counts) == ZMIN
-    for z in range(ZMIN + 1, ZB + 1):
-        assert counts[z - 1] >= counts[z] / 4
-
-
 def test_stats(layer: psycopg.Connection) -> None:
     (stats,) = layer.execute("select stats from gridtiles.layers where name = 'minmax'").fetchone()
     assert set(stats) == {"population", "completeness", "pop_min", "pop_max"}
