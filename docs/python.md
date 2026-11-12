@@ -49,6 +49,8 @@ spec.model_dump_json()  # JSON accepted by gridtiles.create_layer
 
 The load and the rollup run in one transaction, so a failing rollup rolls back the load. Each rollup rebuilds every coarser level, so when loading many files pass `rollup=False` and call the SQL function once at the end: `conn.execute("select gridtiles.rollup(%s)", (layer,))`.
 
+`upsert(conn, layer, path, *, mode="add", refresh_stats=False, ...)` applies a batch to an existing layer incrementally: `add` merges it like `load`, `replace` overwrites the base cells it touches. Only those cells and their ancestors are rewritten, and the result equals a full rollup, so it is the cheap way to keep a large layer up to date. Stats, cell count and bounds are refreshed only with `refresh_stats=True`, since that scans the base level. Concurrent upserts into one layer apply one after the other.
+
 ```python
 import psycopg
 

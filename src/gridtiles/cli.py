@@ -17,7 +17,7 @@ from pydantic import ValidationError
 
 from gridtiles import db, martin, viewer
 from gridtiles.export import export_pmtiles
-from gridtiles.ingest import MAX_CELLS_PER_FEATURE, CellLimitExceeded
+from gridtiles.ingest import MAX_CELLS_PER_FEATURE, CellLimitExceeded, UpsertMode, upsert
 from gridtiles.ingest import load as load_source
 from gridtiles.spec import LayerSpec
 
@@ -79,18 +79,28 @@ def load(
     force: Annotated[
         bool, typer.Option(help=f"Allow polygons spanning more than {MAX_CELLS_PER_FEATURE:,} base cells")
     ] = False,
+    append: Annotated[bool, typer.Option(help="Add to the layer incrementally instead of rolling up fully")] = False,
+    replace_cells: Annotated[bool, typer.Option(help="Overwrite the base cells the source touches, incrementally")] = False,
+    refresh_stats: Annotated[bool, typer.Option(help="With --append / --replace-cells: refresh stats and bounds")] = False,
     db_url: Db = None,
     config: Config = None,
 ) -> None:
     """Load points, polygons or a raster into a layer and roll it up."""
+    if append and replace_cells:
+        _fail("Use either --append or --replace-cells.")
     settings = _settings(config)
     with psycopg.connect(_db_url(db_url, settings)) as conn:
         try:
             db.layer_spec(conn, layer)
         except LookupError:
             db.create_layer(conn, _layer_spec(layer, spec, settings))
+        max_cells = None if force else MAX_CELLS_PER_FEATURE
         try:
-            report = load_source(conn, layer, src, max_cells_per_feature=None if force else MAX_CELLS_PER_FEATURE)
+            if append or replace_cells:
+                mode: UpsertMode = "replace" if replace_cells else "add"
+                report = upsert(conn, layer, src, mode=mode, refresh_stats=refresh_stats, max_cells_per_feature=max_cells)
+            else:
+                report = load_source(conn, layer, src, max_cells_per_feature=max_cells)
         except CellLimitExceeded as e:
             _fail(f"{e} (use --force)")
         except ValueError as e:  # UnsupportedGeometry, raster CRS or pixel size, source columns

@@ -6,6 +6,7 @@ Every command takes `--db URL` and `--config FILE`. Settings precedence: flags, 
 | --- | --- |
 | `gridtiles init` | Install or upgrade the schema; records its version in `gridtiles.meta` |
 | `gridtiles load SRC --layer NAME [--spec FILE] [--force]` | Create the layer if absent (from `--spec` or `gridtiles.toml`), load points, polygons or a raster, roll up |
+| `gridtiles load SRC --layer NAME --append \| --replace-cells [--refresh-stats]` | Upsert: add to, or overwrite the touched cells of, an existing layer incrementally |
 | `gridtiles layers` | List layers with zooms, published tile zooms and cell counts |
 | `gridtiles serve [--layer NAME ...]` | Serve live tiles with Martin and the viewer until interrupted |
 | `gridtiles export --layer NAME -o FILE.pmtiles` | Write a PMTiles archive plus `index.html` and `config.json` next to it |
@@ -23,7 +24,7 @@ gridtiles export --layer pop -o site/pop.pmtiles
 
 `export` writes every tile with data in the published zoom range (gzip-compressed MVT) to one archive whose metadata holds the layer manifest (`gridtiles`: version, spec, stats, bounds). Upload the folder to any static host that answers HTTP range requests (S3, R2, GitHub Pages; Python's `http.server` does not). Exports of the same data are byte-identical.
 
-`serve` writes `build/martin.yaml` (one function source `tile_<name>` per layer, serving the published tile zooms) and `build/viewer/`, then runs a local `martin` binary, or the pinned Martin Docker image on the host network when there is none. `--port`, `--martin-port` and `--build` change the defaults.
+`serve` writes `build/martin.yaml` (one function source `tile_<name>` per layer, serving the published tile zooms) and `build/viewer/`, then runs a local `martin` binary, or the pinned Martin Docker image on the host network when there is none. Martin's tile cache is off, so loads and upserts show as soon as they commit. `--port`, `--martin-port` and `--build` change the defaults.
 
 Both servers listen on `127.0.0.1` only. `build/martin.yaml` holds the database URL including its password, so keep `--build` out of version control and shared folders. Docker host networking needs Linux; on macOS or Windows, install a local `martin` binary. The viewer loads MapLibre and the PMTiles reader from unpkg (pinned, with subresource integrity), so it needs internet access.
 

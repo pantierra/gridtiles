@@ -1,16 +1,10 @@
--- Rollup: rebuild levels zb - 1 down to zmin from their children, then refresh the layer stats
--- and bounds.
+-- Rollup: rebuild levels zb - 1 down to zmin from their children, then refresh stats and bounds.
 
 create or replace function gridtiles.rollup(name text) returns void
 language plpgsql as $$
 declare
     l gridtiles.layers;
     cells text;
-    p record;
-    layer_stats jsonb := '{}';
-    box double precision[];
-    total bigint;
-    s jsonb;
 begin
     select * into strict l from gridtiles.layers where layers.name = rollup.name;
     cells := format('gridtiles.%I', 'cells_' || l.name);
@@ -21,9 +15,24 @@ begin
             cells, gridtiles._column_list(l.spec), z, gridtiles._merge_aggregates(l.spec), z + 1
         );
     end loop;
+    perform gridtiles.refresh_stats(name);
+end $$;
 
-    -- Per value at zb: total (count and sum only; a sum of means or extremes means nothing), min, max
-    -- and 7 quantile breakpoints of the tile property.
+-- Layer stats (per value at zb: min, max, 7 quantile breakpoints of the tile property and, for count
+-- and sum values, the total), row count and WGS84 bounds of the base cells. Scans the base level.
+create or replace function gridtiles.refresh_stats(name text) returns void
+language plpgsql as $$
+declare
+    l gridtiles.layers;
+    cells text;
+    p record;
+    layer_stats jsonb := '{}';
+    box double precision[];
+    total bigint;
+    s jsonb;
+begin
+    select * into strict l from gridtiles.layers where layers.name = refresh_stats.name;
+    cells := format('gridtiles.%I', 'cells_' || l.name);
     for p in select * from gridtiles._properties(l.spec) loop
         execute format(
             'select jsonb_build_object(''total'', %s, ''min'', min(v), ''max'', max(v), ''breaks'',

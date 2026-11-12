@@ -1,26 +1,33 @@
--- Ingest: aggregate a staging table into a layer's base cells (z = zb). The staging table has a
--- `geom` column plus one double precision column per value source and weight. Repeated loads add
--- up: existing cells are merged per aggregator. Rows are written in quadkey order, so concurrent
+-- Ingest: aggregate a staging table into base cells (z = zb). The staging table has a `geom`
+-- column plus one double precision column per value source and weight. Cells go into the layer's
+-- cell table, or into `target` (a table shaped like it, e.g. an upsert delta). Existing cells are
+-- merged per aggregator, so repeated loads add up. Rows are written in quadkey order, so concurrent
 -- loads into one layer lock cells in the same order and avoid deadlocks.
 
--- Insert aggregated base cells from `source`, a query with a `_cell` quadkey column, merging
--- with existing cells.
-create or replace function gridtiles._insert_cells(l gridtiles.layers, source text, aggregates text) returns bigint
+-- Signatures before `target` existed (pre-release); dropped so calls stay unambiguous.
+drop function if exists gridtiles._insert_cells(gridtiles.layers, text, text);
+drop function if exists gridtiles.ingest_points(text, regclass);
+drop function if exists gridtiles.ingest_polygons(text, regclass, bigint);
+
+-- Insert aggregated base cells from `source`, a query with a `_cell` quadkey column.
+create or replace function gridtiles._insert_cells(l gridtiles.layers, source text, aggregates text, target regclass)
+returns bigint
 language plpgsql as $$
 declare
     written bigint;
 begin
     execute format(
-        'insert into gridtiles.%I as t (z, qk, n%s) select %s, _cell, count(*)%s from (%s) s group by _cell order by _cell
+        'insert into %s as t (z, qk, n%s) select %s, _cell, count(*)%s from (%s) s group by _cell order by _cell
          on conflict (z, qk) do update set n = t.n + excluded.n%s',
-        'cells_' || l.name, gridtiles._column_list(l.spec), l.zb, aggregates, source,
-        gridtiles._merge_set(l.spec, 't', 'excluded')
+        coalesce(target, format('gridtiles.%I', 'cells_' || l.name)::regclass), gridtiles._column_list(l.spec), l.zb,
+        aggregates, source, gridtiles._merge_set(l.spec, 't', 'excluded')
     );
     get diagnostics written = row_count;
     return written;
 end $$;
 
-create or replace function gridtiles.ingest_points(name text, staging regclass) returns bigint
+create or replace function gridtiles.ingest_points(name text, staging regclass, target regclass default null)
+returns bigint
 language plpgsql as $$
 declare
     l gridtiles.layers;
@@ -28,7 +35,7 @@ begin
     select * into strict l from gridtiles.layers where layers.name = ingest_points.name;
     return gridtiles._insert_cells(l,
         format('select gridtiles.qk_from_point(geom, %s) as _cell, * from %s where geom is not null and not ST_IsEmpty(geom)', l.zb, staging),
-        gridtiles._aggregates(l.spec));
+        gridtiles._aggregates(l.spec), target);
 end $$;
 
 -- Tile index range at zoom z covered by the bounding box of an EPSG:3857 geometry.
@@ -59,8 +66,9 @@ language sql immutable strict parallel safe as $$
     from (select ST_CollectionExtract(ST_MakeValid(geom), 3) as valid) v
 $$;
 
-create or replace function gridtiles.ingest_polygons(name text, staging regclass, max_cells bigint default 1000000)
-returns bigint
+create or replace function gridtiles.ingest_polygons(
+    name text, staging regclass, max_cells bigint default 1000000, target regclass default null
+) returns bigint
 language plpgsql as $$
 declare
     l gridtiles.layers;
@@ -92,7 +100,7 @@ begin
                  lateral (select ST_Area(ST_Intersection(p._g, ST_TileEnvelope(%s, t.x, u.y))) as _a) a
              where a._a > 0',
             l.zb, l.zb),
-        gridtiles._aggregates(l.spec, '_share', '_area'));
+        gridtiles._aggregates(l.spec, '_share', '_area'), target);
     drop table _gridtiles_polygons;
     return written;
 end $$;

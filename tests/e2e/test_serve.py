@@ -128,3 +128,20 @@ def test_legend_shows_breakpoints(page: Page) -> None:
         "window.current.stats.population.breaks[0].toLocaleString(undefined, {maximumSignificantDigits: 4})"
     )
     assert first in classes.nth(0).inner_text()
+
+
+def test_upsert_shows_immediately(journey: str) -> None:
+    """Runs last in the module: it changes the data the tests above read."""
+
+    def tile() -> bytes:
+        with psycopg.connect(journey) as conn:
+            row = conn.execute("select gridtiles.mvt('pop', 12, %s, %s)", (BLOCK.x, BLOCK.y)).fetchone()
+        assert row is not None
+        return bytes(row[0])
+
+    before = tile()
+    append = ["uv", "run", "gridtiles", "load", str(FIXTURES / "points_small.csv"), "--layer", "pop", "--append"]
+    subprocess.run([*append, "--db", journey], check=True)
+    updated = tile()
+    assert updated != before
+    assert get(f"http://localhost:{MARTIN_PORT}/tile_pop/12/{BLOCK.x}/{BLOCK.y}") == (200, updated)

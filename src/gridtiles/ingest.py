@@ -30,6 +30,7 @@ from gridtiles.quadkey import WORLD
 
 BATCH_SIZE = 100_000
 STAGING = "_gridtiles_staging"
+DELTA = "_gridtiles_delta"
 RESERVED = {"geom"}  # the staging geometry; names starting with "_" are reserved for ingest columns as well
 LON_NAMES = "lon,lng,longitude,x"
 LAT_NAMES = "lat,latitude,y"
@@ -38,6 +39,7 @@ RASTER_SOURCE = "value"  # the source column name of a raster band
 MAX_CELLS_PER_FEATURE = 1_000_000
 
 Kind = Literal["point", "polygon"]
+UpsertMode = Literal["add", "replace"]
 _WKB_KINDS: dict[int, Kind] = {1: "point", 3: "polygon", 6: "polygon"}
 
 
@@ -70,9 +72,56 @@ def load(
     max_cells_per_feature: int | None = MAX_CELLS_PER_FEATURE,
 ) -> LoadReport:
     """Load points, polygons or a raster, detected from the source."""
-    if Path(path).suffix.lower() in RASTER_SUFFIXES:
-        return load_raster(conn, layer, path, band=band, rollup=rollup)
-    return _load_vector(conn, layer, Path(path), None, lon, lat, crs, rollup, max_cells_per_feature)
+    return _load(conn, layer, Path(path), lon, lat, crs, band, rollup, max_cells_per_feature, None)
+
+
+def upsert(
+    conn: psycopg.Connection,
+    layer: str,
+    path: str | PathLike[str],
+    *,
+    mode: UpsertMode = "add",
+    refresh_stats: bool = False,
+    lon: str | None = None,
+    lat: str | None = None,
+    crs: str = "EPSG:4326",
+    band: int = 1,
+    max_cells_per_feature: int | None = MAX_CELLS_PER_FEATURE,
+) -> LoadReport:
+    """Apply a batch to an existing layer incrementally: "add" merges it like `load`, "replace"
+    overwrites the base cells it touches. Only those cells and their ancestors are rewritten, and
+    the result equals a full rollup. Stats, cell count and bounds are refreshed only with
+    `refresh_stats` (they scan the base level)."""
+    layer_spec(conn, layer)  # LookupError for an unknown layer
+    delta = sql.Identifier(DELTA)
+    with conn.transaction():
+        cells = sql.Identifier("gridtiles", f"cells_{layer}")
+        conn.execute(sql.SQL("create temp table {} (like {} including all)").format(delta, cells))
+        report = _load(conn, layer, Path(path), lon, lat, crs, band, False, max_cells_per_feature, DELTA)
+        row = conn.execute("select gridtiles.apply_delta(%s, %s::regclass, %s)", (layer, DELTA, mode)).fetchone()
+        conn.execute(sql.SQL("drop table {}").format(delta))
+        if refresh_stats:
+            conn.execute("select gridtiles.refresh_stats(%s)", (layer,))
+    assert row is not None
+    return LoadReport(report.records_read, report.records_loaded, report.skipped_null_geometry, int(row[0]))
+
+
+def _load(
+    conn: psycopg.Connection,
+    layer: str,
+    path: Path,
+    lon: str | None,
+    lat: str | None,
+    crs: str,
+    band: int,
+    rollup: bool,
+    max_cells: int | None,
+    target: str | None,
+) -> LoadReport:
+    """`load`, writing base cells into `target` (a table shaped like the cell table) if given."""
+    if path.suffix.lower() in RASTER_SUFFIXES:
+        return _load_raster(conn, layer, path, band, rollup, target)
+    return _load_vector(conn, layer, path, None, lon, lat, crs, rollup, max_cells, target)
 
 
 def load_points(
@@ -118,6 +167,12 @@ def load_raster(
 
     Raises ValueError if pixels are larger than half a base cell; use a lower base zoom then.
     """
+    return _load_raster(conn, layer, Path(path), band, rollup, None)
+
+
+def _load_raster(
+    conn: psycopg.Connection, layer: str, path: Path, band: int, rollup: bool, target: str | None
+) -> LoadReport:
     spec = layer_spec(conn, layer)
     sources = _sources(conn, layer)
     if set(sources) - {RASTER_SOURCE}:
@@ -136,7 +191,7 @@ def load_raster(
     )
     with conn.transaction():
         _stage(conn, sources, records)
-        cells = _ingest(conn, layer, "point", None, rollup)
+        cells = _ingest(conn, layer, "point", None, rollup, target)
     return LoadReport(len(values), len(values), 0, cells)
 
 
@@ -173,6 +228,7 @@ def _load_vector(
     crs: str,
     rollup: bool,
     max_cells: int | None,
+    target: str | None = None,
 ) -> LoadReport:
     sources = _sources(conn, layer)
     counts = {"read": 0, "loaded": 0}
@@ -196,7 +252,7 @@ def _load_vector(
 
     with conn.transaction(), _open(path, sources, lon, lat, crs) as (srid, batches):
         _stage(conn, sources, records(srid, batches))
-        cells = _ingest(conn, layer, found[0] if found else "point", max_cells, rollup)
+        cells = _ingest(conn, layer, found[0] if found else "point", max_cells, rollup, target)
     return LoadReport(counts["read"], counts["loaded"], counts["read"] - counts["loaded"], cells)
 
 
@@ -211,14 +267,17 @@ def _stage(conn: psycopg.Connection, sources: list[str], records: Iterable[tuple
             copy.write_row(record)
 
 
-def _ingest(conn: psycopg.Connection, layer: str, kind: Kind, max_cells: int | None, rollup: bool) -> int:
-    """Aggregate the staging table into base cells, drop it and optionally roll up."""
+def _ingest(
+    conn: psycopg.Connection, layer: str, kind: Kind, max_cells: int | None, rollup: bool, target: str | None = None
+) -> int:
+    """Aggregate the staging table into base cells (or `target`), drop it and optionally roll up."""
     try:
         if kind == "polygon":
-            query = "select gridtiles.ingest_polygons(%s, %s::regclass, %s)"
-            row = conn.execute(query, (layer, STAGING, max_cells)).fetchone()
+            query = "select gridtiles.ingest_polygons(%s, %s::regclass, %s, %s::regclass)"
+            row = conn.execute(query, (layer, STAGING, max_cells, target)).fetchone()
         else:
-            row = conn.execute("select gridtiles.ingest_points(%s, %s::regclass)", (layer, STAGING)).fetchone()
+            query = "select gridtiles.ingest_points(%s, %s::regclass, %s::regclass)"
+            row = conn.execute(query, (layer, STAGING, target)).fetchone()
     except errors.ProgramLimitExceeded as e:
         message = str(e.diag.message_primary)
         if "max_cells_per_feature" not in message:  # another limit, e.g. an index row too large
