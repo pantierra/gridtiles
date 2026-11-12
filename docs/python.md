@@ -34,3 +34,17 @@ spec = LayerSpec.model_validate(
 spec.detail  # 4
 spec.model_dump_json()  # JSON accepted by gridtiles.create_layer
 ```
+
+## `gridtiles.ingest`
+
+`load_points(conn, layer, path, *, lon=None, lat=None, crs="EPSG:4326")` loads a point file into an existing layer and returns a `LoadReport` (`records_read`, `records_loaded`, `skipped_null_geometry`, `cells_written`). It reads GeoParquet with pyarrow and everything else through GDAL (CSV, GeoJSON, Shapefile, GeoPackage…). For CSV, `lon` / `lat` name the coordinate columns (default: common names such as `lon`, `lat`). `crs` applies when the source declares none. Null and empty points count as `skipped_null_geometry`; non-point geometry raises `UnsupportedGeometry`.
+
+```python
+import psycopg
+
+from gridtiles.ingest import load_points
+
+with psycopg.connect("postgresql://postgres:postgres@localhost:5439/postgres") as conn:
+    report = load_points(conn, "pop", "tests/fixtures/points_small.csv")
+    print(report)  # LoadReport(records_read=8, records_loaded=8, skipped_null_geometry=0, cells_written=3)
+```
