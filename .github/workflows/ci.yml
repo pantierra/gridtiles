@@ -17,3 +17,20 @@ jobs:
           enable-cache: true
       - run: uv sync
       - run: uv run pre-commit run --all-files --show-diff-on-failure
+
+  check:
+    name: make check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - run: uv sync
+      - run: make up
+      - run: make db-reset
+      - run: make check
+      - if: always()
+        run: docker compose logs
+      - if: always()
+        run: make down
