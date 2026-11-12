@@ -5,6 +5,7 @@ cells happens in SQL (`gridtiles.ingest_points`).
 """
 
 import json
+import math
 import struct
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -78,8 +79,8 @@ def load_points(
             for batch in batches:
                 values = [pc.cast(batch.column(s), pa.float64()).to_pylist() for s in sources]
                 for i, wkb in enumerate(batch.column(0).to_pylist()):
-                    if wkb is not None:
-                        copy.write_row((_point_ewkb(wkb, srid, read + i), *(col[i] for col in values)))
+                    if wkb is not None and (ewkb := _point_ewkb(wkb, srid, read + i)) is not None:
+                        copy.write_row((ewkb, *(col[i] for col in values)))
                         loaded += 1
                 read += batch.num_rows
         row = conn.execute("select gridtiles.ingest_points(%s, %s::regclass)", (layer, STAGING)).fetchone()
@@ -136,10 +137,20 @@ def _srid(crs: str) -> int:
     return int(code)
 
 
-def _point_ewkb(wkb: bytes, srid: int, row: int) -> bytes:
-    """Check that WKB is a point and embed the SRID (EWKB), so PostGIS reads it directly."""
+def _point_ewkb(wkb: bytes, srid: int, row: int) -> bytes | None:
+    """Check that WKB is a point and embed the SRID (EWKB), so PostGIS reads it directly.
+
+    Returns None for an empty point (NaN coordinates, as GDAL writes POINT EMPTY). EWKB input that
+    already carries an SRID is passed through unchanged.
+    """
     order = "<" if wkb[0] == 1 else ">"
     (kind,) = struct.unpack_from(order + "I", wkb, 1)
     if (kind & 0xFFFF) % 1000 != 1:
         raise UnsupportedGeometry(f"row {row}: only points are supported, got WKB geometry type {kind}")
+    has_srid = kind & 0x20000000
+    (x,) = struct.unpack_from(order + "d", wkb, 9 if has_srid else 5)
+    if math.isnan(x):
+        return None
+    if has_srid:
+        return wkb
     return wkb[:1] + struct.pack(order + "II", kind | 0x20000000, srid) + wkb[5:]

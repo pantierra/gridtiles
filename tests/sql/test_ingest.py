@@ -163,3 +163,21 @@ def test_perf_1m_points(db: psycopg.Connection, tmp_path: Path) -> None:
     elapsed = time.perf_counter() - start
     print(f"loaded {report.records_loaded} points in {elapsed:.1f} s")
     assert elapsed < 60
+
+
+def test_empty_point_is_skipped(db: psycopg.Connection, tmp_path: Path) -> None:
+    path = tmp_path / "empty.parquet"
+    empty = struct.pack("<BIdd", 1, 1, math.nan, math.nan)
+    write_geoparquet(path, {"pop": [1, 2], "osm_ratio": [0.5, 0.5], "area": [1.0, 1.0]}, [point_wkb(13.4, 52.5), empty])
+    create(db, SPEC)
+    report = load_points(db, "pop", path)
+    assert (report.records_read, report.records_loaded, report.skipped_null_geometry, report.cells_written) == (2, 1, 1, 1)
+
+
+def test_ewkb_with_srid_is_kept(db: psycopg.Connection, tmp_path: Path) -> None:
+    path = tmp_path / "ewkb.parquet"
+    ewkb = struct.pack("<BIIdd", 1, 1 | 0x20000000, 4326, 13.4, 52.5)
+    write_geoparquet(path, {"pop": [1], "osm_ratio": [0.5], "area": [1.0]}, [ewkb])
+    create(db, SPEC)
+    load_points(db, "pop", path)
+    assert list(cells(db, "pop")) == [(16, quadkey.from_lonlat(13.4, 52.5, 16))]
