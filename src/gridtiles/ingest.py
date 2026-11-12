@@ -23,6 +23,7 @@ from gridtiles.spec import LayerSpec
 
 BATCH_SIZE = 100_000
 STAGING = "_gridtiles_staging"
+RESERVED = {"geom", "_cell"}  # staging and ingest column names a source column must not reuse
 LON_NAMES = "lon,lng,longitude,x"
 LAT_NAMES = "lat,latitude,y"
 
@@ -62,6 +63,8 @@ def load_points(
     """
     spec = layer_spec(conn, layer)
     sources = list(dict.fromkeys(s for v in spec.values if v.agg != "count" for s in (v.from_, v.weight) if s))
+    if clash := RESERVED.intersection(sources):
+        raise ValueError(f"source columns {sorted(clash)} clash with reserved names {sorted(RESERVED)}")
     read = loaded = 0
     with conn.transaction(), _open(Path(path), sources, lon, lat, crs) as (srid, batches):
         conn.execute(
@@ -92,9 +95,14 @@ def _open(
     """Yield the source SRID and record batches whose first column is the geometry as WKB."""
     if path.suffix.lower() in (".parquet", ".geoparquet"):
         source = pq.ParquetFile(path)
-        geo = json.loads(source.schema_arrow.metadata[b"geo"])
+        metadata = source.schema_arrow.metadata or {}
+        if b"geo" not in metadata:
+            raise ValueError(f"{path} is not GeoParquet (no 'geo' metadata); use CSV with lon/lat columns instead")
+        geo = json.loads(metadata[b"geo"])
         geometry = geo["primary_column"]
         column = geo["columns"][geometry]
+        if column.get("encoding", "").upper() != "WKB":
+            raise UnsupportedGeometry(f"{path}: only WKB geometry encoding is supported, got {column.get('encoding')!r}")
         # GeoParquet: no "crs" key means OGC:CRS84, null means unknown, otherwise PROJJSON.
         if "crs" not in column:
             srid = 4326

@@ -13,12 +13,13 @@ create table if not exists gridtiles.layers (
 );
 
 -- Stored columns per value, in table order: the single source for every function that writes or
--- reads cell values. `part` is 'value' or 'weight' (the mean's weight sidecar); `merge` is the
--- aggregate that combines partial results of the column (see _merge).
+-- reads cell values. `i` is the column position; `part` is 'value' or 'weight' (the mean's weight
+-- sidecar); `merge` is the aggregate that combines partial results of the column (see _merge).
 create or replace function gridtiles._columns(spec jsonb)
-returns table (value text, agg text, col text, merge text, part text, src text, weight text)
+returns table (value text, agg text, col text, merge text, part text, src text, weight text, i bigint)
 language sql immutable strict parallel safe as $$
-    select v->>'name', v->>'agg', v->>'name' || c.suffix, c.merge, c.part, v->>'from', v->>'weight'
+    select v->>'name', v->>'agg', v->>'name' || c.suffix, c.merge, c.part, v->>'from', v->>'weight',
+        row_number() over (order by e.i, c.pos)
     from jsonb_array_elements(spec->'values') with ordinality as e(v, i)
     join (values
         ('sum', '_sum', 'sum', 'value', 1), ('min', '_min', 'min', 'value', 1), ('max', '_max', 'max', 'value', 1),
@@ -38,22 +39,21 @@ language sql immutable strict parallel safe as $$
 $$;
 
 -- Comma-led list of a layer's value columns, e.g. ", population_sum, completeness_w".
-create or replace function gridtiles._column_list(spec jsonb, prefix text default '') returns text
+create or replace function gridtiles._column_list(spec jsonb) returns text
 language sql immutable strict parallel safe as $$
-    select coalesce(string_agg(', ' || prefix || quote_ident(col), '' order by i), '')
-    from gridtiles._columns(spec) with ordinality c(value, agg, col, merge, part, src, weight, i)
+    select coalesce(string_agg(', ' || quote_ident(col), '' order by i), '')
+    from gridtiles._columns(spec) c
 $$;
 
--- Comma-led aggregates turning source records into value columns. Each record's contribution is
--- multiplied by `scale` (an SQL expression; '1' for points, the covered share for polygons).
-create or replace function gridtiles._aggregates(spec jsonb, scale text default '1') returns text
+-- Comma-led aggregates turning source records into value columns.
+create or replace function gridtiles._aggregates(spec jsonb) returns text
 language sql immutable strict parallel safe as $$
     select coalesce(string_agg(', ' || case
-        when c.part = 'weight' then format('sum(case when %I is not null then %s * %s end)', c.src, w, scale)
-        when c.agg in ('sum', 'mean') then format('sum(%I * %s * %s)', c.src, w, scale)
+        when c.part = 'weight' then format('sum(case when %I is not null then %s end)', c.src, w)
+        when c.agg in ('sum', 'mean') then format('sum(%I * %s)', c.src, w)
         else format('%s(%I)', c.merge, c.src)
     end, '' order by c.i), '')
-    from gridtiles._columns(spec) with ordinality c(value, agg, col, merge, part, src, weight, i), lateral (select case when c.agg = 'mean' then coalesce(quote_ident(c.weight), '1') else '1' end as w) x(w)
+    from gridtiles._columns(spec) c, lateral (select case when c.agg = 'mean' then coalesce(quote_ident(c.weight), '1') else '1' end as w) x(w)
 $$;
 
 -- Comma-led "col = merge(a.col, b.col)" assignments, e.g. for ON CONFLICT DO UPDATE.
@@ -61,7 +61,7 @@ create or replace function gridtiles._merge_set(spec jsonb, a text, b text) retu
 language sql immutable strict parallel safe as $$
     select coalesce(string_agg(format(', %I = %s', col,
         gridtiles._merge(merge, a || '.' || quote_ident(col), b || '.' || quote_ident(col))), '' order by i), '')
-    from gridtiles._columns(spec) with ordinality c(value, agg, col, merge, part, src, weight, i)
+    from gridtiles._columns(spec) c
 $$;
 
 create or replace function gridtiles._check_spec(spec jsonb) returns void
@@ -118,7 +118,7 @@ begin
         'create table gridtiles.%I (z smallint, qk bigint, n bigint not null%s, primary key (z, qk))',
         'cells_' || name,
         (select coalesce(string_agg(format(', %I double precision', col), '' order by i), '')
-         from gridtiles._columns(spec) with ordinality c(value, agg, col, merge, part, src, weight, i))
+         from gridtiles._columns(spec) c)
     );
 end $$;
 

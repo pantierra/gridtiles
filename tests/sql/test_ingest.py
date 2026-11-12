@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 
 import psycopg
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from psycopg.types.json import Jsonb
@@ -125,6 +126,30 @@ def test_polygon_raises(db: psycopg.Connection, tmp_path: Path) -> None:
     create(db, SPEC)
     with pytest.raises(UnsupportedGeometry, match="row 1"):
         load_points(db, "pop", path)
+
+
+def test_plain_parquet_raises(db: psycopg.Connection, tmp_path: Path) -> None:
+    path = tmp_path / "plain.parquet"
+    pq.write_table(pa.table({"lon": [13.4], "lat": [52.5], "pop": [1], "osm_ratio": [0.5], "area": [1.0]}), path)
+    create(db, SPEC)
+    with pytest.raises(ValueError, match="not GeoParquet"):
+        load_points(db, "pop", path)
+
+
+def test_native_geoparquet_encoding_raises(db: psycopg.Connection, tmp_path: Path) -> None:
+    path = tmp_path / "native.parquet"
+    geo = {"version": "1.1.0", "primary_column": "geometry", "columns": {"geometry": {"encoding": "point"}}}
+    table = pa.table({"pop": [1], "osm_ratio": [0.5], "area": [1.0], "geometry": [{"x": 13.4, "y": 52.5}]})
+    pq.write_table(table.replace_schema_metadata({"geo": json.dumps(geo)}), path)
+    create(db, SPEC)
+    with pytest.raises(UnsupportedGeometry, match="encoding"):
+        load_points(db, "pop", path)
+
+
+def test_reserved_source_column_raises(db: psycopg.Connection) -> None:
+    create(db, {**SPEC, "name": "reserved", "values": [{"name": "g", "from": "geom", "agg": "sum"}]})
+    with pytest.raises(ValueError, match="reserved"):
+        load_points(db, "reserved", FIXTURES / "points_small.csv")
 
 
 @pytest.mark.perf
