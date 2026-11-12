@@ -2,6 +2,7 @@
 this module. Implementations are resolved by name, so callers never import them directly.
 """
 
+import re
 from collections.abc import Iterator
 from datetime import date
 from importlib import import_module
@@ -18,6 +19,7 @@ native_mvt: the store encodes tiles itself; snapshots: layers keep dated version
 
 BACKENDS = {
     "postgres": "gridtiles.backends.postgres:PostgresBackend",
+    "duckdb": "gridtiles.backends.duckdb:DuckDBBackend",
 }
 
 
@@ -31,7 +33,7 @@ class LayerExists(ValueError):
 
 class Backend(Protocol):
     capabilities: frozenset[Capability]
-    url: str  # where the data lives, e.g. a PostgreSQL URL
+    url: str  # where the data lives: a PostgreSQL URL or a DuckDB file path
 
     def __enter__(self) -> Self: ...
     def __exit__(self, *exc: object) -> None: ...
@@ -116,13 +118,21 @@ class Backend(Protocol):
 
 
 def open_backend(url: str, kind: str | None = None) -> Backend:
-    """Open the backend named `kind` (default "postgres") on `url`."""
-    kind = kind or "postgres"
+    """Open the backend named `kind` ("postgres" or "duckdb") on `url`. By default a postgres:// or
+    postgresql:// URL or a libpq "key=value" string opens PostgreSQL, anything else a DuckDB file."""
+    kind = kind or kind_of(url)
     if kind not in BACKENDS:
         raise ValueError(f"unknown backend {kind!r}; one of {', '.join(BACKENDS)}")
     module, _, cls = BACKENDS[kind].partition(":")
     backend: Backend = getattr(import_module(module), cls)(url)
     return backend
+
+
+def kind_of(url: str) -> str:
+    """ "postgres" for a postgres(ql):// URL or a libpq "key=value" string, else "duckdb" (a file path,
+    which may contain "=" in a directory name)."""
+    libpq = re.match(r"^\s*\w+\s*=", url)
+    return "postgres" if url.startswith(("postgres://", "postgresql://")) or libpq else "duckdb"
 
 
 def require(backend: Backend, capability: Capability, action: str) -> None:

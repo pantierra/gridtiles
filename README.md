@@ -13,7 +13,7 @@ uv add gridtiles
 
 ## Quickstart
 
-With PostgreSQL + PostGIS running (`make up` starts one on port 5439):
+With PostgreSQL + PostGIS running (`make up` starts one on port 5439), or with a DuckDB file instead (`GRIDTILES_DB=cells.duckdb`):
 
 ```bash
 export GRIDTILES_DB=postgresql://postgres:postgres@localhost:5439/postgres

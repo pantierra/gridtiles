@@ -37,7 +37,7 @@ spec.model_dump_json(exclude_none=True)  # JSON accepted by gridtiles.create_lay
 
 ## Backends
 
-Every store implements the `Backend` protocol (`gridtiles.backends.base`); the CLI, exporter, embedded server and API use nothing else. `open_backend(url)` opens PostgreSQL for a `postgresql://` URL or a libpq `key=value` string.
+Every store implements the `Backend` protocol (`gridtiles.backends.base`); the CLI, exporter, embedded server and API use nothing else. `open_backend(url)` opens PostgreSQL for a `postgresql://` URL (or a libpq `key=value` string) and DuckDB for a file path; pass `kind="postgres"` or `"duckdb"` to choose explicitly.
 
 | Operation | Does |
 | --- | --- |
@@ -55,7 +55,12 @@ Every store implements the `Backend` protocol (`gridtiles.backends.base`); the C
 
 Capabilities tell what else a backend offers: `live` (an external tile server reads the store), `incremental` (upserts touch only what changed), `native_mvt` (the store encodes tiles itself), `snapshots` (dated versions of a layer, `load(..., snapshot=)`, `tile(..., snapshot=)` and `diff`). A backend raises `MissingCapability` for what it lacks.
 
-PostgreSQL + PostGIS has `live`, `incremental`, `native_mvt` and `snapshots`: upserts touch only the changed cells and their ancestors, and tiles come from `gridtiles.mvt` (`ST_AsMVT`) in SQL, served by Martin or embedded.
+| | PostgreSQL + PostGIS | DuckDB + spatial |
+| --- | --- | --- |
+| Opened with | `postgresql://…` | `cells.duckdb` |
+| Capabilities | `live`, `incremental`, `native_mvt`, `snapshots` | `native_mvt` |
+| Upserts | touched cells and their ancestors only | merge, then rebuild all levels |
+| Tiles | `gridtiles.mvt` (`ST_AsMVT`) in SQL, served by Martin | `ST_AsMVT` in SQL, served embedded |
 
 ### Sources
 
@@ -75,7 +80,7 @@ The load and the rollup run in one transaction, so a failing rollup rolls back t
 from gridtiles.backends.base import open_backend
 from gridtiles.spec import LayerSpec
 
-with open_backend("postgresql://postgres:postgres@localhost:5439/postgres") as backend:
+with open_backend("cells.duckdb") as backend:  # or "postgresql://postgres:postgres@localhost:5439/postgres"
     backend.install()
     backend.create_layer(LayerSpec.model_validate_json(open("tests/fixtures/spec_pop.json").read()))
     print(backend.load("pop", "tests/fixtures/points_small.csv"))
@@ -91,6 +96,6 @@ with open_backend("postgresql://postgres:postgres@localhost:5439/postgres") as b
 from gridtiles.backends.base import open_backend
 from gridtiles.export import export_pmtiles
 
-with open_backend("postgresql://postgres:postgres@localhost:5439/postgres") as backend:
+with open_backend("cells.duckdb") as backend:
     export_pmtiles(backend, "pop", "site/pop.pmtiles")  # site/pop.pmtiles, site/index.html, site/config.json
 ```

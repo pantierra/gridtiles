@@ -1,6 +1,7 @@
 """The journey on each backend: init -> load -> serve, then tiles over HTTP and the viewer in a browser.
 
-PostgreSQL is served live (Martin on the database) and embedded (tiles from the serve process).
+PostgreSQL is served live (Martin on the database) and embedded (tiles from the serve process);
+DuckDB embedded.
 """
 
 import json
@@ -24,7 +25,7 @@ pytestmark = pytest.mark.e2e
 
 ARTIFACTS = Path("build/e2e")
 BLOCK = mercantile.tile(13.405, 52.52, 12)
-PORTS = {"postgres": (8081, 3001), "postgres-embedded": (8082, None)}
+PORTS = {"postgres": (8081, 3001), "postgres-embedded": (8082, None), "duckdb": (8083, None)}
 
 
 @dataclass
@@ -60,7 +61,10 @@ def journey(request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFac
     """Run the three commands from an empty store; the map must render within 2 minutes."""
     start = time.monotonic()
     tmp = tmp_path_factory.mktemp(request.param)
-    db = fresh_database("gridtiles_e2e_" + request.param.replace("-", "_"))
+    if request.param == "duckdb":
+        db = str(tmp / "cells.duckdb")
+    else:
+        db = fresh_database("gridtiles_e2e_" + request.param.replace("-", "_"))
     cli = ["uv", "run", "gridtiles"]
     subprocess.run([*cli, "init", "--db", db], check=True)
     load = [*cli, "load", str(FIXTURES / "points_10k.parquet"), "--layer", "pop", "--spec", str(FIXTURES / "spec_pop.json")]
@@ -152,6 +156,8 @@ def test_legend_shows_breakpoints(page: Page) -> None:
 
 
 def test_time_slider_changes_features(journey: Journey, page: Page) -> None:
+    if journey.backend == "duckdb":
+        pytest.skip("snapshots need PostgreSQL")
     rendered = "JSON.stringify(window.map.queryRenderedFeatures({layers: ['cells']}).map((f) => f.properties))"
     page.select_option("#layer", label="ts")
     page.wait_for_function("window.current.name === 'ts' && window.map.loaded() && window.map.areTilesLoaded()")
@@ -168,6 +174,8 @@ def test_time_slider_changes_features(journey: Journey, page: Page) -> None:
 
 def test_upsert_shows_immediately(journey: Journey, tmp_path: Path) -> None:
     """Runs last in the module: it changes the data the tests above read."""
+    if journey.backend == "duckdb":
+        pytest.skip("an embedded DuckDB server holds its file, so another process cannot load into it")
     db = journey.db
     append = ["uv", "run", "gridtiles", "load", str(FIXTURES / "points_small.csv"), "--layer", "pop", "--append"]
     subprocess.run([*append, "--db", db], check=True)

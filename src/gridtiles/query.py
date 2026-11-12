@@ -1,4 +1,4 @@
-"""Region statistics over a layer's cells, as plain SQL any backend can run.
+"""Region statistics over a layer's cells, as SQL both PostgreSQL and DuckDB run.
 
 A region is a quadkey prefix (its descendants), a WGS84 bbox or a GeoJSON polygon (edges straight in
 lon/lat); bbox and polygon regions take the cells at the chosen zoom whose centroid lies inside

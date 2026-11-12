@@ -92,6 +92,16 @@ def test_missing_database_exits_2(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     assert "No database" in result.output
 
 
+def test_duckdb_cannot_serve_live(tmp_path: Path) -> None:
+    db = str(tmp_path / "cells.duckdb")
+    assert run("init", "--db", db).exit_code == 0
+    spec = FIXTURES / "spec_pop.json"
+    assert run("load", FIXTURES / "points_small.csv", "--layer", "pop", "--spec", spec, "--db", db).exit_code == 0
+    result = run("serve", "--live", "--db", db)
+    assert result.exit_code == 2
+    assert "'live'" in result.output and "--embedded" in result.output
+
+
 def test_append_and_replace(url: str) -> None:
     spec = FIXTURES / "spec_pop.json"
     assert run("load", FIXTURES / "points_small.csv", "--layer", "inc", "--spec", spec, "--db", url).exit_code == 0
@@ -113,6 +123,13 @@ def test_snapshots_and_diff(url: str, tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     assert "ts_delta" in run("layers", "--db", url).output
     assert run("diff", "ts@2026-10-01", "missing", "--as", "nope", "--db", url).exit_code == 2
+
+
+def test_duckdb_refuses_diff(tmp_path: Path) -> None:
+    db = str(tmp_path / "cells.duckdb")
+    run("init", "--db", db)
+    result = run("diff", "a", "b", "--as", "c", "--db", db)
+    assert result.exit_code == 2 and "snapshots" in result.output
 
 
 def test_failed_first_load_leaves_no_layer(url: str, tmp_path: Path) -> None:

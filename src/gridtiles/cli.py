@@ -25,7 +25,7 @@ app = typer.Typer(no_args_is_help=True, add_completion=False, help="Quadkey grid
 
 Db = Annotated[
     str | None,
-    typer.Option("--db", help="PostgreSQL URL [default: gridtiles.toml [backend], then $GRIDTILES_DB]"),
+    typer.Option("--db", help="PostgreSQL URL or DuckDB file [default: gridtiles.toml [backend], then $GRIDTILES_DB]"),
 ]
 Config = Annotated[Path | None, typer.Option(help="Settings file [default: ./gridtiles.toml if present]")]
 
