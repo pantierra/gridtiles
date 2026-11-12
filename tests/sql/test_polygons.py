@@ -52,6 +52,14 @@ def test_self_intersecting_polygon_loads(db: psycopg.Connection, tmp_path: Path)
     assert sum(pop for _, pop in cell_rows(db, "poly", 16).values()) == pytest.approx(400)
 
 
+def test_polygon_beyond_mercator_limit_keeps_its_total(db: psycopg.Connection, tmp_path: Path) -> None:
+    path = tmp_path / "arctic.gpkg"
+    write_vector(path, COLUMNS, [polygon_wkb([(10.0, 84.0), (10.01, 84.0), (10.01, 87.0), (10.0, 87.0)])])
+    create(db, {**POLY_SPEC, "base_zoom": 10})
+    load_polygons(db, "poly", path)
+    assert sum(pop for _, pop in cell_rows(db, "poly", 10).values()) == pytest.approx(400)
+
+
 def test_polygon_over_four_cells(db: psycopg.Connection, tmp_path: Path) -> None:
     qk = quadkey.from_lonlat(13.405, 52.52, 15)
     create(db, POLY_SPEC)

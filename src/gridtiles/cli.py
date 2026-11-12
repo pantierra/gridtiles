@@ -16,7 +16,7 @@ import typer
 from pydantic import ValidationError
 
 from gridtiles import db, martin, viewer
-from gridtiles.ingest import CellLimitExceeded, UnsupportedGeometry
+from gridtiles.ingest import MAX_CELLS_PER_FEATURE, CellLimitExceeded, UnsupportedGeometry
 from gridtiles.ingest import load as load_source
 from gridtiles.spec import LayerSpec
 
@@ -75,7 +75,9 @@ def load(
     src: Path,
     layer: Annotated[str, typer.Option(help="Layer name; created if absent")],
     spec: Annotated[Path | None, typer.Option(help="Layer spec JSON for a new layer")] = None,
-    force: Annotated[bool, typer.Option(help="Allow polygons spanning more than 1,000,000 base cells")] = False,
+    force: Annotated[
+        bool, typer.Option(help=f"Allow polygons spanning more than {MAX_CELLS_PER_FEATURE:,} base cells")
+    ] = False,
     db_url: Db = None,
     config: Config = None,
 ) -> None:
@@ -87,7 +89,7 @@ def load(
         except LookupError:
             db.create_layer(conn, _layer_spec(layer, spec, settings))
         try:
-            report = load_source(conn, layer, src, max_cells_per_feature=None if force else 1_000_000)
+            report = load_source(conn, layer, src, max_cells_per_feature=None if force else MAX_CELLS_PER_FEATURE)
         except CellLimitExceeded as e:
             _fail(f"{e} (use --force)")
         except UnsupportedGeometry as e:
