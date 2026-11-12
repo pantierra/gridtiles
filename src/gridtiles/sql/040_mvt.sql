@@ -39,9 +39,11 @@ begin
     );
 end $$;
 
--- Vector tile for one layer; an empty tile is a zero-length bytea.
+-- Vector tile for one layer; an empty tile is a zero-length bytea. JIT is off: PostGIS functions
+-- carry high cost estimates, so the planner would JIT-compile most tile queries, which takes
+-- longer (around 150 ms) than running them.
 create or replace function gridtiles.mvt(name text, z int, x int, y int, params jsonb default '{}') returns bytea
-language plpgsql stable parallel safe as $$
+language plpgsql stable parallel safe set jit = off as $$
 declare
     result bytea;
 begin

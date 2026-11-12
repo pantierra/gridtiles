@@ -158,8 +158,6 @@ begin
     elsif spec#>>'{source,kind}' is distinct from null and spec#>>'{source,kind}' <> kind then
         raise exception 'source.kind % differs from the % column %.%', spec#>'{source,kind}', kind, qualified, geom
             using errcode = '22023';
-    elsif kind = 'polygon' then
-        raise exception 'polygon sources are not supported yet' using errcode = '0A000';
     end if;
 
     for s in select * from gridtiles._sources(spec) loop

@@ -183,3 +183,21 @@ def test_perf_tiles(db: psycopg.Connection, tmp_path: Path) -> None:
     p95 = statistics.quantiles(timings, n=20)[-1]
     print(f"p95 {p95 * 1000:.1f} ms over 500 tiles")
     assert p95 < 0.5
+
+
+def test_polygon_counts_once_per_square(db: psycopg.Connection) -> None:
+    """A polygon over one z15 square: four z16 squares with a quarter each, or one z15 square
+    with n = 1, not the sum of its children's counts.
+    """
+    db.execute("create table polys (geom geometry(MultiPolygon, 3857), pop int, osm_ratio float8, area float8)")
+    db.execute("create index on polys using gist (geom)")
+    qk15 = quadkey.from_lonlat(13.405, 52.52, 15)
+    db.execute("insert into polys select ST_Multi(gridtiles.qk_envelope(15, %s)), 400, 0.5, 1", (qk15,))
+    create(db, SPEC, "polys")
+    x, y = quadkey.to_xy(15, qk15)
+    base = features(tile(db, 12, x >> 3, y >> 3))
+    assert sorted((f["properties"]["n"], f["properties"]["population"]) for f in base) == [(1, pytest.approx(100))] * 4
+    (coarse,) = features(tile(db, 11, x >> 4, y >> 4))
+    assert (coarse["properties"]["z"], coarse["properties"]["n"]) == (15, 1)
+    assert coarse["properties"]["population"] == pytest.approx(400)
+    assert coarse["properties"]["completeness"] == pytest.approx(0.5)

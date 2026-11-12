@@ -71,15 +71,42 @@ begin
     sy := format('least(greatest(floor((20037508.342789244 - (%s)) / %s), 0), %s)::int', my, size, top);
 end $$;
 
--- The source rows of a region: `_g` (see _square_sql) and each source column as double precision
--- under its alias (_sources), so source column names never clash with the query's own.
+-- The source rows of a region: `_g`, the geometry ready to aggregate (a point in EPSG:3857 or
+-- 4326, see _square_sql; a polygon from _mercator_polygon), and each source column as double
+-- precision under its alias (_sources), so source column names never clash with the query's own.
 create or replace function gridtiles._source_sql(l gridtiles.layers, filter text) returns text
 language sql stable parallel safe as $$
     select format('select %s as _g%s from %s where %s and not ST_IsEmpty(%I)',
-        case when l.srid in (3857, 4326) then quote_ident(l.geometry) else format('ST_Transform(%I, 4326)', l.geometry) end,
+        case when l.kind = 'polygon' then format('gridtiles._mercator_polygon(%I)', l.geometry)
+             when l.srid in (3857, 4326) then quote_ident(l.geometry)
+             else format('ST_Transform(%I, 4326)', l.geometry) end,
         coalesce((select string_agg(format(', %I::double precision as %s', s.col, s.alias), '' order by s.alias)
                   from gridtiles._sources(l.spec) s), ''),
         l.source, filter, l.geometry)
+$$;
+
+-- A polygon in EPSG:3857, ready to split: ST_MakeValid repairs self-intersections (which
+-- ST_Intersection would reject), keeping the polygonal part; WGS84 input is clipped to the Mercator
+-- latitudes before projecting, since the poles have no Mercator coordinates; the result is clipped
+-- to the Web Mercator square, so a polygon's whole value lands on squares that exist.
+create or replace function gridtiles._mercator_polygon(geom geometry) returns geometry
+language sql immutable strict parallel safe as $$
+    select ST_Intersection(
+        ST_Transform(case when ST_SRID(valid) = 4326
+                          then ST_Intersection(valid, ST_MakeEnvelope(-180, -85.06, 180, 85.06, 4326))
+                          else valid end, 3857),
+        ST_MakeEnvelope(-20037508.342789244, -20037508.342789244, 20037508.342789244, 20037508.342789244, 3857))
+    from (select ST_CollectionExtract(ST_MakeValid(geom), 3) as valid) v
+$$;
+
+-- Tile index range at zoom z covered by the bounding box of an EPSG:3857 geometry.
+create or replace function gridtiles._bbox_tile_range(g geometry, z int, out x0 int, out x1 int, out y0 int, out y1 int)
+language sql immutable strict parallel safe as $$
+    select greatest(floor((ST_XMin(g) + 20037508.342789244) / size)::int, 0),
+           least(floor((ST_XMax(g) + 20037508.342789244) / size)::int, top),
+           greatest(floor((20037508.342789244 - ST_YMax(g)) / size)::int, 0),
+           least(floor((20037508.342789244 - ST_YMin(g)) / size)::int, top)
+    from (select 40075016.68557849::double precision / (1::bigint << z) as size, (1 << z) - 1 as top) k
 $$;
 
 -- A sum over the rows of a square. Float sums depend on their order; `gridtiles.sum_mode` picks
@@ -114,16 +141,43 @@ language sql stable parallel safe as $$
 $$;
 
 -- One row per square of the region with data: _x, _y, n and one column per non-count value.
+-- Points: each point counts in the square holding it. Polygons: each polygon is split over the
+-- squares it overlaps by covered area (in EPSG:3857), as the materialized ingest did: sums get
+-- value x covered fraction, means are weighted by covered area, min/max apply to every touched
+-- square, and n counts the polygons touching a square; a zero-area touch does not count. A
+-- polygon is clipped to the region once (unless it lies inside), then intersected per square;
+-- its share divides by the area of the whole polygon. `offset 0` keeps the planner from inlining
+-- a subquery's expressions into every reference, which would repair, project and clip a polygon
+-- again for every square.
 create or replace function gridtiles._aggregate_sql(l gridtiles.layers, c int, z int, x int, y int) returns text
 language plpgsql stable parallel safe as $$
 declare
     reg record := gridtiles._region(l, c, z, x, y);
-    sq record := gridtiles._square_sql(l.srid, c);
+    sq record;
+    r int := least(z, c);
+    envelope text := format('ST_TileEnvelope(%s, %s, %s)', r, x >> (z - r), y >> (z - r));
 begin
+    if l.kind = 'polygon' then
+        return format(
+            'select _x, _y, count(*) as n%s from (
+                select p.*, _x, _y, _a, _a / p._total as _share
+                from (select *, case when _g @ %2$s then _g else ST_Intersection(_g, %2$s) end as _r
+                      from (select *, ST_Area(_g) as _total from (%3$s offset 0) s offset 0) s
+                      where _total > 0 offset 0) p,
+                    gridtiles._bbox_tile_range(p._r, %4$s) b,
+                    generate_series(greatest(b.x0, %5$s), least(b.x1, %6$s)) _x,
+                    generate_series(greatest(b.y0, %7$s), least(b.y1, %8$s)) _y,
+                    lateral (select ST_Area(ST_Intersection(p._r, ST_TileEnvelope(%4$s, _x, _y))) as _a) a
+             ) h where _a > 0 group by _x, _y',
+            gridtiles._values_sql(l.spec, '_share', '_a'), envelope, gridtiles._source_sql(l, reg.filter),
+            c, reg.x0, reg.x1, reg.y0, reg.y1);
+    end if;
+    sq := gridtiles._square_sql(l.srid, c);
     return format(
-        'select _x, _y, count(*) as n%s from (select %s as _x, %s as _y, * from (%s) s) p
+        'select _x, _y, count(*) as n%s from (select %s as _x, %s as _y, * from (%s%s) s) p
          where _x between %s and %s and _y between %s and %s group by _x, _y',
         gridtiles._values_sql(l.spec), sq.sx, sq.sy, gridtiles._source_sql(l, reg.filter),
+        case when l.srid in (3857, 4326) then '' else ' offset 0' end,  -- one transform per point
         reg.x0, reg.x1, reg.y0, reg.y1);
 end $$;
 
@@ -158,8 +212,8 @@ begin
 end $$;
 
 -- Every tile with data in the published zoom range [max(0, zmin - detail), max(0, zb - detail)]:
--- the tiles holding a point at the highest published zoom, and their ancestors. A square's
--- index at a coarser zoom is its index shifted right (the scale is a power of two, so exactly).
+-- the tiles with data at the highest published zoom (holding a point, or overlapping a polygon),
+-- and their ancestors. A square's index at a coarser zoom is its index shifted right.
 create or replace function gridtiles.tiles_with_data(name text) returns table (z int, x int, y int)
 language plpgsql stable parallel safe as $$
 declare
