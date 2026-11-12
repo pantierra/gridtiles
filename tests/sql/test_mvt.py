@@ -44,12 +44,24 @@ def bbox(feature: dict) -> tuple[int, int, int, int]:
 
 
 def test_dense_block_tile(block: psycopg.Connection) -> None:
-    feats = features(tile(block, 12, BLOCK.x, BLOCK.y))
+    data = tile(block, 12, BLOCK.x, BLOCK.y)
+    feats = features(data)
     assert len(feats) == 256
     boxes = {bbox(f) for f in feats}
     assert all(x1 - x0 == 256 and y1 - y0 == 256 and x0 % 256 == 0 and y0 % 256 == 0 for x0, y0, x1, y1 in boxes)
     assert len(boxes) == 256  # 256 distinct squares of 256 x 256 tile the 4096 extent exactly
     assert sum((x1 - x0) * (y1 - y0) for x0, y0, x1, y1 in boxes) == 4096 * 4096
+
+    # The per-layer tile function (Martin's source) returns the same tile.
+    (via_function,) = block.execute("select gridtiles.tile_pop(12, %s, %s)", (BLOCK.x, BLOCK.y)).fetchone()
+    assert bytes(via_function) == data
+
+    # The tile query can use the primary key; seq scans are disabled since tiny tables may prefer one.
+    block.execute("set local enable_seqscan = off")
+    (query,) = block.execute("select gridtiles._mvt_query('pop', 12, %s, %s)", (BLOCK.x, BLOCK.y)).fetchone()
+    plan = "\n".join(r[0] for r in block.execute("explain " + query).fetchall())
+    assert "cells_pop_pkey" in plan
+    assert "Seq Scan" not in plan
 
 
 def test_feature_properties_match_rows(block: psycopg.Connection) -> None:
@@ -94,19 +106,6 @@ def test_tile_below_range_clamps_to_min_zoom(db: psycopg.Connection, tmp_path: P
     t = mercantile.tile(13.405, 52.52, 2)
     feats = features(tile(db, 2, t.x, t.y, "coarse"))
     assert feats and {f["properties"]["z"] for f in feats} == {8}
-
-
-def test_tile_function_per_layer(block: psycopg.Connection) -> None:
-    (data,) = block.execute("select gridtiles.tile_pop(12, %s, %s)", (BLOCK.x, BLOCK.y)).fetchone()
-    assert bytes(data) == tile(block, 12, BLOCK.x, BLOCK.y)
-
-
-def test_query_uses_primary_key(block: psycopg.Connection) -> None:
-    block.execute("set local enable_seqscan = off")  # the gate: an index path exists; plan choice on tiny tables aside
-    (query,) = block.execute("select gridtiles._mvt_query('pop', 12, %s, %s)", (BLOCK.x, BLOCK.y)).fetchone()
-    plan = "\n".join(r[0] for r in block.execute("explain " + query).fetchall())
-    assert "cells_pop_pkey" in plan
-    assert "Seq Scan" not in plan
 
 
 @pytest.mark.perf
