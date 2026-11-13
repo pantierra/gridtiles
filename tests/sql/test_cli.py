@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 import psycopg
@@ -92,4 +93,4 @@ def test_missing_database_exits_2(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("GRIDTILES_DB", raising=False)
     result = run("layers")
     assert result.exit_code == 2
-    assert "--db" in result.output
+    assert "--db" in re.sub(r"\x1b\[[0-9;]*m", "", result.output)  # rich colours the usage error in CI
