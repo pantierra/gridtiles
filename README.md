@@ -4,9 +4,9 @@
 
 Serve any PostGIS table of points or polygons as a quadkey grid of zoomable vector tiles, aggregated live on every request. [Why a quadkey grid?](docs/concept.md)
 
-![The viewer on world population: zooming into the Nile valley, hovering a square, a live insert, and countries](docs/demo.gif)
+![The viewer on world population: squares summed live per tile request, quadkeys gaining a digit per zoom, and several values per square](docs/demo.gif)
 
-World population 2025 (2.8 million 5 km cells) and 242 countries in PostGIS, aggregated on each tile request: zooming from the world into the Nile valley, hovering a square, a live `INSERT` that shows on the next request, and countries split over squares by covered area. Data: [GHSL](https://human-settlement.emergency.copernicus.eu/) population grid (European Commission, JRC; CC BY 4.0) and [Natural Earth](https://www.naturalearthdata.com/) countries (public domain).
+World population 2025 in one PostGIS table (2.8 million 5 km cells), served without precomputed tiles: every square is summed from the table when its tile is requested (the overlay shows how long PostGIS took). Zooming in, each square splits into four and its quadkey gains a digit; each square carries several values (total, densest cell, average). Data: [GHSL](https://human-settlement.emergency.copernicus.eu/) population grid (European Commission, JRC; CC BY 4.0).
 
 ## Installation
 

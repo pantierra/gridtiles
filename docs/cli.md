@@ -32,4 +32,4 @@ Both servers listen on `127.0.0.1` only. `build/martin.yaml` holds the database 
 
 ## Viewer
 
-The viewer draws the squares over a light basemap ([OpenFreeMap](https://openfreemap.org) Positron, no API key), below its place names, and styles the layer's first value in 8 classes: quantile breaks of the squares on screen, recomputed after each move, so every zoom shows contrast (colours are relative to the view). It opens on the layer's bounds. Hovering a square shows its quadkey, zoom, `n` and values. With several layers, a selector switches between them.
+The viewer draws the squares over a light basemap ([OpenFreeMap](https://openfreemap.org) Positron, no API key), below its place names, and colours the value chosen in the panel (the first by default) in 8 classes: quantile breaks of the squares on screen, recomputed after each move, so every zoom shows contrast (colours are relative to the view). It opens on the layer's bounds. Hovering a square shows its quadkey, zoom, `n` and values. With several layers, a selector switches between them.

@@ -163,3 +163,15 @@ def test_legend_follows_the_view(page: Page) -> None:
         "window.map.queryRenderedFeatures({layers: ['cells']}).map((f) => f.properties.population).sort((a, b) => a - b)"
     )
     assert values[0] <= page.evaluate("window.breaks[0]") <= page.evaluate("window.breaks[6]") <= values[-1]
+
+
+def test_value_selector_restyles(page: Page) -> None:
+    """Choosing another value colours the map and the legend by it."""
+    page.wait_for_function("window.styledKey === 'population' && window.breaks")
+    population = page.inner_text("#legend")
+    page.select_option("#value", index=1)
+    page.wait_for_function("window.styledKey === 'completeness'")
+    assert page.inner_text("#legend") != population
+    assert "completeness" in page.evaluate("JSON.stringify(window.map.getPaintProperty('cells', 'fill-color'))")
+    page.select_option("#value", index=0)
+    page.wait_for_function("window.styledKey === 'population'")
