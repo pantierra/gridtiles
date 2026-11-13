@@ -109,7 +109,7 @@ class _TileFetcher:
             self.local.conn = psycopg.connect(self.conninfo, autocommit=True)
             self.connections.append(self.local.conn)
         rows = self.local.conn.execute(
-            "select gridtiles.mvt(%s, z, x, y, %s)"
+            "select gridtiles.mvt(%s, z, x, y, %s, cached => false)"
             " from unnest(%s::int[], %s::int[], %s::int[]) with ordinality t(z, x, y, i) order by i",
             (self.layer, Jsonb(self.params), *map(list, zip(*tiles))),
         ).fetchall()

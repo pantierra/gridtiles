@@ -7,6 +7,7 @@ import subprocess
 import threading
 import time
 import tomllib
+from collections.abc import Callable
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Annotated, Any, NoReturn
@@ -63,6 +64,27 @@ def _layer_spec(layer: str, spec_file: Path | None, settings: dict[str, Any]) ->
         return LayerSpec.model_validate({**data, "name": layer})
     except ValidationError as e:
         _fail(f"Invalid layer spec:\n{e}")
+
+
+class _Refreshed:
+    """`build()`, rebuilt at most every `seconds` by one thread at a time; the last result while a
+    rebuild fails."""
+
+    def __init__(self, build: Callable[[], dict[str, Any]], seconds: float) -> None:
+        self.build, self.seconds = build, seconds
+        self.lock = threading.Lock()
+        self.value: dict[str, Any] | None = None
+        self.at = 0.0
+
+    def __call__(self) -> dict[str, Any]:
+        with self.lock:
+            if self.value is None or time.monotonic() - self.at > self.seconds:
+                try:
+                    self.value, self.at = self.build(), time.monotonic()
+                except psycopg.Error:
+                    if self.value is None:
+                        raise
+            return self.value
 
 
 @app.command()
@@ -191,22 +213,18 @@ def serve(
     names = [lay.name for lay in layers]
     config_path = martin.write_config(build / "martin.yaml", url, layers, martin_port)
     site = viewer.write(build / "viewer", layers, lambda lay: martin.tile_url(lay, martin_port))
-    cached: dict[str, Any] = {"at": 0.0}
 
-    def live_config() -> dict[str, Any]:
-        """The viewer config with stats from the source, recomputed at most every STATS_MAX_AGE seconds."""
-        if time.monotonic() - cached["at"] > STATS_MAX_AGE or "config" not in cached:
-            with psycopg.connect(url) as conn:
-                fresh = db.layers(conn, names, stats=True)
-            cached.update(at=time.monotonic(), config=viewer.config(fresh, lambda lay: martin.tile_url(lay, martin_port)))
-        return dict(cached["config"])
+    def viewer_config() -> dict[str, Any]:
+        with psycopg.connect(url) as conn:
+            fresh = db.layers(conn, names, stats=True)
+        return viewer.config(fresh, lambda lay: martin.tile_url(lay, martin_port))
 
     def stop(*_: object) -> None:
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, stop)
     tiles = subprocess.Popen(martin.command(config_path))
-    server = ThreadingHTTPServer(("127.0.0.1", port), viewer.handler(site, live_config))
+    server = ThreadingHTTPServer(("127.0.0.1", port), viewer.handler(site, _Refreshed(viewer_config, STATS_MAX_AGE)))
     threading.Thread(target=server.serve_forever, daemon=True).start()
     typer.echo(f"Viewer on http://localhost:{port}, tiles on http://localhost:{martin_port}")
     try:

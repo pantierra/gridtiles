@@ -57,7 +57,7 @@ Tiles filter the source by the tile's bounding box, so the source needs a GiST i
 
 ## Vector tiles
 
-`mvt(name, z, x, y, params jsonb default '{}')` returns one Mapbox Vector Tile with a layer `cells` (extent 4096, buffer 0). A tile at zoom `t` carries the squares at `c(t) = clamp(t + detail, min_zoom, base_zoom)`: with the default `detail = 4`, a 16 × 16 grid. Past the base zoom it carries the single ancestor square. Each feature is a square with the properties `qk` (text form), `z`, `n` and one per non-`count` value, in quadkey order. An empty tile is a zero-length `bytea`.
+`mvt(name, z, x, y, params jsonb default '{}', cached boolean default true)` returns one Mapbox Vector Tile with a layer `cells` (extent 4096, buffer 0). A tile at zoom `t` carries the squares at `c(t) = clamp(t + detail, min_zoom, base_zoom)`: with the default `detail = 4`, a 16 × 16 grid. Past the base zoom it carries the single ancestor square. Each feature is a square with the properties `qk` (text form), `z`, `n` and one per non-`count` value, in quadkey order. An empty tile is a zero-length `bytea`.
 
 | `agg` | Tile property, over the source rows in a square |
 | --- | --- |
@@ -82,7 +82,7 @@ Published tile zooms are `[max(0, min_zoom - detail), max(0, base_zoom - detail)
 | `start=V`, `end=V` | the rows with `start <= time < end`; either may be absent |
 | `at=V&diff=W` | `at` minus `diff`, per square: counts and sums count a missing side as 0; means, minima and maxima exist only where both sides have data |
 
-A malformed parameter (not a valid date or timestamp, `at` with `start`/`end`, `diff` without `at`, a time parameter on a layer without a time column) raises `22023` from `mvt`; `tile_<name>` returns an empty tile instead and logs a warning. Other keys are ignored.
+A malformed parameter (not a valid date or timestamp, `at` with `start`/`end`, `diff` without `at`, a time parameter on a layer without a time column) raises `22023` from `mvt`; `tile_<name>` returns an empty tile instead and logs a warning. Other errors, such as a dropped source, propagate. Other keys are ignored.
 
 ```sql
 select length(gridtiles.mvt('pop', 12, 2200, 1343, '{"at": "2024-02-01", "diff": "2024-01-01"}'));
@@ -96,7 +96,7 @@ select length(gridtiles.mvt('pop', 12, 2200, 1343, '{"at": "2024-02-01", "diff":
 
 ## Cache
 
-A tile at a low zoom aggregates much of the source; see [performance](performance.md). `refresh_cache(name, max_zoom)` stores the squares of levels `min_zoom` … `max_zoom` in `gridtiles.cache_<name>`, as tiles compute them; tiles at those levels then read the cache unless a parameter filters the source. The cache lags the source until refreshed (`layers.cached_at` says when); `refresh_cache(name, null)` drops it. It returns the number of cached squares.
+A tile at a low zoom aggregates much of the source; see [performance](performance.md). `refresh_cache(name, max_zoom)` stores the squares of levels `min_zoom` … `max_zoom` in `gridtiles.cache_<name>`, as tiles compute them; tiles at those levels then read the cache unless a parameter filters the source or `mvt` is called with `cached => false`, as exports do; `stats` and `tiles_with_data` always read the source. The cache lags the source until refreshed (`layers.cached_at` says when); `refresh_cache(name, null)` drops it. It returns the number of cached squares.
 
 ```sql
 select gridtiles.refresh_cache('pop', 8);

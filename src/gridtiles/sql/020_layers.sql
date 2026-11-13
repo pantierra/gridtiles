@@ -94,7 +94,7 @@ end $$;
 
 -- Register a layer over its source: a typed point or polygon geometry column, numeric value
 -- columns and an optional date or timestamp column. Creates the tile function tile_<name>, a
--- Martin function source: a malformed URL parameter gives an empty tile and a logged warning.
+-- Martin function source: a malformed time parameter gives an empty tile and a logged warning.
 create or replace function gridtiles.create_layer(spec jsonb) returns void
 language plpgsql as $$
 declare
@@ -137,15 +137,19 @@ begin
         time_type, (spec->>'base_zoom')::int, (spec->>'min_zoom')::int, coalesce((spec->>'detail')::int, 4)
     from pg_class c join pg_namespace n on n.oid = c.relnamespace where c.oid = rel;
     execute format(
-        'create function gridtiles.%I(z integer, x integer, y integer, query_params json) returns bytea
+        'create function gridtiles.%5$I(z integer, x integer, y integer, query_params json) returns bytea
          language plpgsql stable as $f$
          begin
-             return gridtiles.mvt(%L, z, x, y, coalesce(query_params::jsonb, %L));
-         exception when invalid_parameter_value then
-             raise warning %L, sqlerrm;
-             return %L::bytea;
+             begin
+                 perform gridtiles._time_filter(l, coalesce(query_params::jsonb, %2$L))
+                 from gridtiles.layers l where l.name = %1$L;
+             exception when invalid_parameter_value then
+                 raise warning %3$L, sqlerrm;
+                 return %4$L::bytea;
+             end;
+             return gridtiles.mvt(%1$L, z, x, y, coalesce(query_params::jsonb, %2$L));
          end $f$',
-        'tile_' || name, name, '{}', 'tile_' || name || ': %', ''
+        name, '{}', 'tile_' || name || ': %', '', 'tile_' || name
     );
 end $$;
 

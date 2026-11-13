@@ -122,8 +122,10 @@ def test_unknown_layer_raises(db: psycopg.Connection) -> None:
 
 def test_dropped_source_raises(block: psycopg.Connection) -> None:
     block.execute("drop table pop_points")
-    with pytest.raises(psycopg.errors.UndefinedTable):
+    with pytest.raises(psycopg.errors.UndefinedTable), block.transaction():
         tile(block, 12, BLOCK.x, BLOCK.y)
+    with pytest.raises(psycopg.errors.UndefinedTable):  # only parameter errors become empty tiles
+        block.execute("select gridtiles.tile_pop(12, %s, %s, '{}')", (BLOCK.x, BLOCK.y))
 
 
 def test_recreated_source_is_used(block: psycopg.Connection) -> None:
@@ -159,6 +161,11 @@ def test_cache(db: psycopg.Connection) -> None:
     # Tiles at cached levels (c = z + 4 <= 8) lag the source until the next refresh.
     db.execute("delete from pop_points where pop > 50")
     assert [tile(db, *t) == old for t, old in zip(tiles, live)] == [True] * 5 + [False] * 4
+    # Exports (cached => false), stats and tiles_with_data read the source.
+    (fresh,) = db.execute("select gridtiles.mvt('pop', 0, 0, 0, '{}', cached => false)").fetchone()
+    assert bytes(fresh) != live[0]
+    (stats,) = db.execute("select gridtiles.stats('pop')").fetchone()
+    assert db.execute("select sum(pop) from pop_points").fetchone() == (stats["stats"]["population"]["total"],)
     db.execute("select gridtiles.refresh_cache('pop', 8)")
     assert tile(db, *tiles[0]) != live[0]
 

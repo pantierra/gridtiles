@@ -4,8 +4,8 @@
 -- ancestor square. One layer named `cells`, extent 4096, buffer 0, features in quadkey order.
 
 -- The tile query as SQL text (exposed for EXPLAIN in tests).
-create or replace function gridtiles._mvt_query(name text, z int, x int, y int, params jsonb default '{}')
-returns text
+create or replace function gridtiles._mvt_query(name text, z int, x int, y int, params jsonb default '{}',
+    cached boolean default true) returns text
 language plpgsql stable parallel safe as $$
 declare
     l gridtiles.layers;
@@ -24,18 +24,20 @@ begin
         c,
         (select coalesce(string_agg(format(', %I', v->>'name'), '' order by i), '')
          from jsonb_array_elements(l.spec->'values') with ordinality e(v, i) where v->>'agg' <> 'count'),
-        z, x, y, gridtiles._aggregate_sql(l, c, z, x, y, params)
+        z, x, y, gridtiles._aggregate_sql(l, c, z, x, y, params, cached)
     );
 end $$;
 
--- Vector tile for one layer; an empty tile is a zero-length bytea. JIT is off: PostGIS functions
+-- Vector tile for one layer; an empty tile is a zero-length bytea. With `cached` false, levels
+-- in the cache (refresh_cache) are aggregated from the source as well. JIT is off: PostGIS functions
 -- carry high cost estimates, so the planner would JIT-compile most tile queries, which takes
 -- longer (around 150 ms) than running them.
-create or replace function gridtiles.mvt(name text, z int, x int, y int, params jsonb default '{}') returns bytea
+create or replace function gridtiles.mvt(name text, z int, x int, y int, params jsonb default '{}',
+    cached boolean default true) returns bytea
 language plpgsql stable parallel safe set jit = off as $$
 declare
     result bytea;
 begin
-    execute gridtiles._mvt_query(name, z, x, y, params) into result;
+    execute gridtiles._mvt_query(name, z, x, y, params, cached) into result;
     return coalesce(result, ''::bytea);
 end $$;

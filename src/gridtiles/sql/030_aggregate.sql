@@ -195,9 +195,9 @@ $$;
 -- (unless it lies inside), then to each square; its share divides by the area of the whole
 -- polygon. `offset 0` keeps the planner from inlining a subquery's expressions into every
 -- reference, which would repair, project and clip a polygon again for every use. Levels up to
--- the layer's cache_zoom read the cache instead, unless a parameter filters the source.
-create or replace function gridtiles._aggregate_sql(l gridtiles.layers, c int, z int, x int, y int, params jsonb)
-returns text
+-- the layer's cache_zoom read the cache instead if `cached`, unless a parameter filters the source.
+create or replace function gridtiles._aggregate_sql(l gridtiles.layers, c int, z int, x int, y int, params jsonb,
+    cached boolean) returns text
 language plpgsql stable parallel safe as $$
 declare
     t record := gridtiles._time_filter(l, params);
@@ -208,7 +208,7 @@ declare
     r int := least(z, c);
     envelope text := format('ST_TileEnvelope(%s, %s, %s)', r, x >> (z - r), y >> (z - r));
 begin
-    if c <= l.cache_zoom and t.filter = 'true' then
+    if cached and c <= l.cache_zoom and t.filter = 'true' then
         return format('select _x, _y, n%s from gridtiles.%I where _z = %s and _x between %s and %s and _y between %s and %s',
             (select coalesce(string_agg(format(', %I', name), '' order by i), '') from gridtiles._value_exprs(l.spec, '1', '1')),
             'cache_' || l.name, c, reg.x0, reg.x1, reg.y0, reg.y1);
@@ -261,7 +261,7 @@ begin
             from jsonb_array_elements(l.spec->'values') with ordinality e(v, i),
                 lateral (select case when v->>'agg' = 'count' then 'n' else quote_ident(v->>'name') end) q(p)),
             '''{}''::jsonb'),
-        l.zb, gridtiles._aggregate_sql(l, l.zb, 0, 0, 0, params)
+        l.zb, gridtiles._aggregate_sql(l, l.zb, 0, 0, 0, params, false)
     ) into result;
     return result;
 end $$;
@@ -302,7 +302,7 @@ begin
         'select t, _x >> (%1$s - t), _y >> (%1$s - t)
          from (select _x, _y from (%2$s) a) a, generate_series(%3$s, %1$s) t
          group by 1, 2, 3 order by 1, 2, 3',
-        tmax, gridtiles._aggregate_sql(l, tmax, 0, 0, 0, params), tmin);
+        tmax, gridtiles._aggregate_sql(l, tmax, 0, 0, 0, params, false), tmin);
 end $$;
 
 -- Cache the squares of levels min_zoom .. max_zoom, without parameters, in gridtiles.cache_<name>;
@@ -320,10 +320,9 @@ begin
         raise exception 'max_zoom % is below min_zoom %', max_zoom, l.zmin using errcode = '22023';
     end if;
     execute format('drop table if exists gridtiles.%I', tbl);
-    l.cache_zoom := null;  -- build from the source, not from the old cache
     if max_zoom is not null then
         execute format('create table gridtiles.%I as %s', tbl, (
-            select string_agg(format('select %s::smallint as _z, * from (%s) a', c, gridtiles._aggregate_sql(l, c, 0, 0, 0, '{}')),
+            select string_agg(format('select %s::smallint as _z, * from (%s) a', c, gridtiles._aggregate_sql(l, c, 0, 0, 0, '{}', false)),
                 ' union all ')
             from generate_series(l.zmin, least(max_zoom, l.zb)) c));
         get diagnostics squares = row_count;
