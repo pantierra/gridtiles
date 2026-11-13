@@ -37,21 +37,20 @@ Requires [uv](https://docs.astral.sh/uv/) and Docker with Compose.
 ```bash
 uv sync
 uv run pre-commit install
-make up      # start PostGIS (port 5439) and Martin (port 3000)
+make up      # start PostGIS (port 5439)
 make check   # lint, type check, unit + SQL tests, end-to-end tests
 make down
 ```
 
 | Command | Does |
 | --- | --- |
-| `make up` / `make down` | Start / stop the compose services, waiting until healthy |
-| `make db-reset` | Recreate the `gridtiles_test` database and install the schema (`gridtiles init`) |
+| `make up` / `make down` | Start / stop PostGIS, waiting until healthy |
 | `make test` | Unit and SQL tests |
-| `make e2e` | End-to-end tests against the running services |
+| `make e2e` | End-to-end tests: `gridtiles serve` (Martin from a local binary or Docker) and the viewer in a browser |
 | `make check` | ruff, mypy and all tests, including end-to-end |
 | `make bench` | Tile latency per zoom on 10 million generated points and 100,000 polygons |
 
-Override the host ports with `GRIDTILES_DB_PORT` and `GRIDTILES_MARTIN_PORT`, and point tests elsewhere with `GRIDTILES_TEST_DSN` and `GRIDTILES_MARTIN_URL`.
+Override the host port with `GRIDTILES_DB_PORT`, and point tests elsewhere with `GRIDTILES_TEST_DSN`.
 
 The SQL in `src/gridtiles/sql/` installs the `gridtiles` schema (`gridtiles init`); check the installed version with:
 

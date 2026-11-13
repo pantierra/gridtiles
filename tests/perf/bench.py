@@ -15,7 +15,7 @@ import psycopg
 from gridtiles.db import create_layer, install
 from gridtiles.spec import LayerSpec
 
-from ..conftest import ADMIN_DSN
+from ..conftest import ADMIN_DSN, POINT_SQUARE
 
 DB = "gridtiles_live_bench"
 VALUES = [
@@ -79,11 +79,11 @@ def ensure_layers(conn: psycopg.Connection) -> None:
 def sample_tiles(conn: psycopg.Connection, table: str, z: int, k: int) -> list[tuple[int, int]]:
     """Up to k distinct tiles at zoom z holding a sampled row: busy places come up more often."""
     rows = conn.execute(
-        f"select distinct gridtiles.qk_from_point(ST_PointOnSurface(geom), %s) from {table} tablesample system (0.1)"
-        " repeatable (7) limit %s",
+        f"select distinct (gridtiles.point_square(ST_PointOnSurface(geom), %s)).* from {table}"
+        " tablesample system (0.1) repeatable (7) limit %s",
         (z, k),
     ).fetchall()
-    return [tuple(conn.execute("select * from gridtiles.qk_to_xy(%s, %s)", (z, qk)).fetchone()) for (qk,) in rows]
+    return [(x, y) for x, y in rows]
 
 
 CACHE_ZOOM = 8
@@ -126,6 +126,7 @@ def main() -> None:
     with psycopg.connect(url, autocommit=True) as conn:
         conn.execute("drop schema if exists gridtiles cascade")  # the generated data lives in public
         install(conn)
+        conn.execute(POINT_SQUARE.read_text())  # for sample_tiles
         ensure_data(conn, args.points, args.polygons)
         ensure_layers(conn)
         print("| layer | variant | z | tiles | first ms | p50 ms | p95 ms | KiB |")

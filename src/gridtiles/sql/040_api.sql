@@ -13,15 +13,17 @@ declare
     l gridtiles.layers;
     c int;
 begin
-    perform gridtiles.qk_from_xyz(z, x, y);  -- validates the tile address (SQLSTATE 22003)
+    if z not between 0 and 30 or x not between 0 and (1 << z) - 1 or y not between 0 and (1 << z) - 1 then
+        raise exception 'tile %/%/% outside the grid', z, x, y using errcode = '22003';
+    end if;
     select * into strict l from gridtiles.layers where layers.name = _mvt_query.name;
     c := least(greatest(z + l.detail, l.zmin), l.zb);
     return format(
         'select ST_AsMVT(f, ''cells'', 4096, ''geom'') from (
-            select gridtiles.qk_to_text(%1$s, gridtiles._qk(_x, _y)) as qk, %1$s::smallint as z, n%2$s,
+            select gridtiles.quadkey(%1$s, _x, _y) as qk, %1$s::smallint as z, n%2$s,
                 ST_AsMVTGeom(ST_TileEnvelope(%1$s, _x, _y), ST_TileEnvelope(%3$s, %4$s, %5$s), 4096, 0) as geom
             from (%6$s) a
-            order by gridtiles._qk(_x, _y)
+            order by qk
         ) f',
         c,
         (select coalesce(string_agg(format(', %I', v->>'name'), '' order by i), '')

@@ -29,7 +29,6 @@ jobs:
       - run: uv sync
       - run: uv run playwright install --with-deps chromium
       - run: make up
-      - run: make db-reset
       - run: make check
       - if: always()
         uses: actions/upload-artifact@v4

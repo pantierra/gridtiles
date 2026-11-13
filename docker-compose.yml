@@ -10,14 +10,3 @@ services:
       interval: 2s
       timeout: 5s
       retries: 30
-
-  martin:
-    image: ghcr.io/maplibre/martin:1.16.0
-    command: ["--config", "/config/martin.yaml"]
-    ports:
-      - "127.0.0.1:${GRIDTILES_MARTIN_PORT:-3000}:3000"
-    volumes:
-      - ./docker/martin.yaml:/config/martin.yaml:ro
-    depends_on:
-      db:
-        condition: service_healthy

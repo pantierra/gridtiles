@@ -1,6 +1,6 @@
 -- Live aggregation: SQL builders that aggregate a layer's source into the squares of one region
 -- at zoom c. The public functions in 040_api.sql run the queries built here.
--- Square (_x, _y) at zoom c is ST_TileEnvelope(c, _x, _y); its quadkey is _qk(_x, _y).
+-- Square (_x, _y) at zoom c is ST_TileEnvelope(c, _x, _y); its quadkey is quadkey(c, _x, _y).
 
 -- A region: the tile index ranges [x0, x1] x [y0, y1] at zoom c of the squares a request covers,
 -- and the source filter selecting their rows. With c >= z the region is tile z/x/y; with c < z
@@ -52,8 +52,9 @@ begin
 end $$;
 
 -- The square index (_x, _y) at zoom c of each point, as SQL over `_g`, the point in EPSG:3857 or
--- 4326 (_source_sql transforms any other SRID to 4326 first). These are the float operations of
--- qk_from_point, inlined: same operations, same squares, without a PL/pgSQL call per row.
+-- 4326 (_source_sql transforms any other SRID to 4326 first): the spherical Web Mercator formula
+-- with the latitude clamped, inlined so a tile needs no function call per row. A point on a
+-- boundary goes east / south; points beyond the edges go to the edge squares.
 create or replace function gridtiles._square_sql(srid int, c int, out sx text, out sy text)
 language plpgsql immutable strict parallel safe as $$
 declare
