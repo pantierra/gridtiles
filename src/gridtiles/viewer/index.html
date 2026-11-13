@@ -15,6 +15,7 @@
     #panel { position: absolute; top: 10px; left: 10px; padding: 8px 10px; background: #fffe;
              border-radius: 4px; box-shadow: 0 1px 4px #0003; font: 12px/1.5 system-ui, sans-serif; }
     #panel select { margin-bottom: 6px; }
+    #value { display: block; margin-top: 4px; }
     .class span { display: inline-block; width: 14px; height: 10px; margin-right: 6px; opacity: 0.7; }
   </style>
 </head>
@@ -22,7 +23,7 @@
   <div id="map"></div>
   <div id="panel">
     <select id="layer" hidden></select>
-    <div id="title"></div><div id="legend"></div>
+    <div id="title"></div><select id="value" hidden></select><div id="legend"></div>
   </div>
   <script>
     maplibregl.addProtocol("pmtiles", new pmtiles.Protocol().tile);
@@ -45,18 +46,21 @@
     }
 
     // The styled value: the first one; count values live in the tile property `n`.
-    const styled = (layer) => (layer.values[0].agg === "count" ? "n" : layer.values[0].name);
+    // The value that colours the map, chosen in #value; count values live in the tile property `n`.
+    const styledValue = () => window.current.values[document.getElementById("value").value || 0];
+    const styled = () => (styledValue().agg === "count" ? "n" : styledValue().name);
 
     // Colour classes from the squares on screen: 7 quantile breaks, recomputed after each move, so
     // every zoom shows contrast. Equal breaks merge classes (step stops must increase strictly).
     function restyle() {
       const layer = window.current;
       if (!layer || !map.getLayer("cells")) return;
-      const key = styled(layer);
+      const key = styled();
       const values = map.queryRenderedFeatures({ layers: ["cells"] })
         .map((f) => f.properties[key]).filter((v) => typeof v === "number").sort((a, b) => a - b);
       const breaks = values.length ? [1, 2, 3, 4, 5, 6, 7].map((i) => values[Math.floor((i * values.length) / 8)]) : [];
-      if (JSON.stringify(breaks) === JSON.stringify(window.breaks)) return;
+      if (JSON.stringify([key, breaks]) === JSON.stringify([window.styledKey, window.breaks])) return;
+      window.styledKey = key;
       window.breaks = breaks;
       const step = ["step", ["get", key], PALETTE[0]];
       let last = -Infinity;
@@ -78,10 +82,13 @@
       map.addLayer({ id: "cells", type: "fill", source: "cells", "source-layer": "cells",
                      paint: { "fill-color": PALETTE[4], "fill-opacity": 0.75 } }, labels);
       map.addLayer({ id: "outlines", type: "line", source: "cells", "source-layer": "cells",
-                     minzoom: Math.max(0, layer.base_zoom - 2), paint: { "line-color": "#0003", "line-width": 0.5 } }, labels);
-      const value = layer.values[0];
-      const unit = value.unit ? ` (${value.unit})` : "";
-      document.getElementById("title").textContent = `${layer.name}: ${value.name}${unit} per square`;
+                     paint: { "line-color": "#0002", "line-width": 0.5 } }, labels);
+      document.getElementById("title").textContent = `${layer.name}, per square:`;
+      const values = document.getElementById("value");
+      values.innerHTML = layer.values.map((v, i) =>
+        `<option value="${i}">${esc(v.name)} (${esc(v.agg)}${v.unit ? `, ${esc(v.unit)}` : ""})</option>`).join("");
+      values.hidden = false;
+      values.onchange = restyle;
       window.breaks = null;  // colour classes follow once the squares are drawn (restyle)
       document.getElementById("legend").innerHTML = "";
       window.current = layer;
