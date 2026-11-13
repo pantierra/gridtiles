@@ -1,6 +1,8 @@
 """The single-page MapLibre viewer, the `config.json` it reads, and a server for it."""
 
 import json
+import threading
+import time
 from collections.abc import Callable
 from functools import partial
 from http.server import SimpleHTTPRequestHandler
@@ -52,6 +54,27 @@ def write(directory: Path, layers: list[Layer], tiles: Callable[[Layer], str], *
     return directory
 
 
+class _Refreshed:
+    """`build()`, rebuilt at most every `seconds` by one thread at a time; the last result while a
+    rebuild fails."""
+
+    def __init__(self, build: Callable[[], dict[str, Any]], seconds: float) -> None:
+        self.build, self.seconds = build, seconds
+        self.lock = threading.Lock()
+        self.value: dict[str, Any] | None = None
+        self.at = 0.0
+
+    def __call__(self) -> dict[str, Any]:
+        with self.lock:
+            if self.value is None or time.monotonic() - self.at > self.seconds:
+                try:
+                    self.value, self.at = self.build(), time.monotonic()
+                except psycopg.Error:
+                    if self.value is None:
+                        raise
+            return self.value
+
+
 class _Handler(SimpleHTTPRequestHandler):
     """Static files, except `config.json`, built per request."""
 
@@ -75,6 +98,7 @@ class _Handler(SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
 
-def handler(directory: Path, live_config: Callable[[], dict[str, Any]]) -> Callable[..., SimpleHTTPRequestHandler]:
-    """A request handler serving `directory`, with `config.json` from `live_config()` on every request."""
-    return partial(_Handler, directory=str(directory), live_config=live_config)
+def handler(directory: Path, build: Callable[[], dict[str, Any]], max_age: float) -> Callable[..., SimpleHTTPRequestHandler]:
+    """A request handler serving `directory`, with `config.json` from `build()`, rebuilt at most
+    every `max_age` seconds (the last config while a rebuild fails)."""
+    return partial(_Handler, directory=str(directory), live_config=_Refreshed(build, max_age))

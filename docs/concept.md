@@ -7,11 +7,11 @@ gridtiles aggregates data into a discrete global grid: a hierarchy of cells that
 
 ## The grid
 
-A cell is a Web Mercator (EPSG:3857) tile, identified by its zoom `z` and its quadkey. Each cell splits into exactly four children at `z + 1`, and the hierarchy reaches zoom 30. The quadkey is stored as a `bigint` Morton code: x and y interleave bit by bit, so its base-4 digits are the familiar quadkey string (`"1202"`), most significant first.
+A cell is a Web Mercator (EPSG:3857) tile `z/x/y`, identified by its quadkey: `z` base-4 digits, most significant first (`"1202"` is a cell at zoom 4), each digit naming one of the four children of the cell before it. Each cell splits into exactly four children at `z + 1`, and the hierarchy reaches zoom 30.
 
 This gives three useful properties:
 
-- **Parent and children are bit shifts.** A cell's parent is `qk >> 2`. Its descendants at a finer zoom form one contiguous range, from `qk << 2k` up to, but not including, `(qk + 1) << 2k`.
+- **Parent and children are prefixes.** A cell's parent is its quadkey without the last digit; its descendants at any finer zoom are the quadkeys it prefixes, one contiguous range in quadkey order.
 - **Containment is exact.** Children tile their parent with no gaps or overlaps, so a point belongs to exactly one cell at every zoom.
 - **Map tiles and cells share one address space.** A map tile `z/x/y` is itself a cell. Its contents at any finer zoom are a single key range.
 

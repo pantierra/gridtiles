@@ -1,7 +1,7 @@
 """What a tile contains, checked against brute-force queries over the source.
 
 For a sample of published tiles, every feature must match a direct aggregation of the source
-rows in its square: points by `qk_from_point` (the PL/pgSQL function the tile query's arithmetic
+rows in its square: points by `point_square` (the PL/pgSQL function the tile query's arithmetic
 mirrors), compared bit for bit; polygons by their covered area share (`ST_Intersection` with the
 square, where tiles clip by box), compared to 1e-9.
 """
@@ -20,32 +20,32 @@ TILES_PER_ZOOM = {"point": 4, "polygon": 2}
 
 # One row per square at zoom c inside tile z/x/y, from the points the square holds.
 POINTS = """
-select gridtiles.qk_to_text(%(c)s, q), count(*),
+select gridtiles.quadkey(%(c)s, (sq).x, (sq).y), count(*),
     sum(pop::float8 order by pop::float8),
     sum(osm_ratio::float8 * area::float8 order by osm_ratio::float8 * area::float8)
         / nullif(sum(case when osm_ratio is not null then area::float8 end
                      order by case when osm_ratio is not null then area::float8 end), 0),
     min(pop::float8), max(pop::float8)
-from (select gridtiles.qk_from_point(geom, %(c)s) as q, * from pop_points where not ST_IsEmpty(geom)) s
-where q >> (2 * (%(c)s - %(z)s)) = gridtiles.qk_from_xyz(%(z)s, %(x)s, %(y)s)
-group by q
+from (select gridtiles.point_square(geom, %(c)s) as sq, * from pop_points where not ST_IsEmpty(geom)) s
+where (sq).x >> (%(c)s - %(z)s) = %(x)s and (sq).y >> (%(c)s - %(z)s) = %(y)s
+group by sq
 """
 
 # One row per square at zoom c inside tile z/x/y, from the polygons overlapping it: sums by covered
 # fraction, means weighted by covered area, n the polygons touching it.
 POLYGONS = """
-select gridtiles.qk_to_text(%(c)s, q), count(*), sum(pop * (a / total)),
+select gridtiles.quadkey(%(c)s, sx, sy), count(*), sum(pop * (a / total)),
     sum(ratio * w * a) / nullif(sum(case when ratio is not null then w * a end), 0), min(pop), max(pop)
 from (
-    select p.*, q, ST_Area(ST_Intersection(g, gridtiles.qk_envelope(%(c)s, q))) as a
+    select p.*, sx, sy, ST_Area(ST_Intersection(g, ST_TileEnvelope(%(c)s, sx, sy))) as a
     from (select g, ST_Area(g) as total, pop::float8 as pop, osm_ratio::float8 as ratio, area::float8 as w
           from (select gridtiles._mercator_polygon(geom) as g, * from pop_points offset 0) s offset 0) p,
-        generate_series(gridtiles.qk_from_xyz(%(z)s, %(x)s, %(y)s) << (2 * (%(c)s - %(z)s)),
-                        ((gridtiles.qk_from_xyz(%(z)s, %(x)s, %(y)s) + 1) << (2 * (%(c)s - %(z)s))) - 1) q
-    where total > 0 and g && gridtiles.qk_envelope(%(c)s, q)
+        generate_series(%(x)s::int << (%(c)s - %(z)s), ((%(x)s::int + 1) << (%(c)s - %(z)s)) - 1) sx,
+        generate_series(%(y)s::int << (%(c)s - %(z)s), ((%(y)s::int + 1) << (%(c)s - %(z)s)) - 1) sy
+    where total > 0 and g && ST_TileEnvelope(%(c)s, sx, sy)
 ) h
 where a > 0
-group by q
+group by sx, sy
 """
 PROPERTIES = ("n", "population", "completeness", "pop_min", "pop_max")
 
@@ -83,8 +83,7 @@ def assert_point_layer(db: psycopg.Connection, spec: dict = SPEC) -> None:
         (t, x, y)
         for t in zooms
         for x, y in db.execute(
-            "select distinct (gridtiles.qk_to_xy(%(t)s, gridtiles.qk_from_point(geom, %(t)s))).*"
-            " from pop_points where not ST_IsEmpty(geom)",
+            "select distinct (gridtiles.point_square(geom, %(t)s)).* from pop_points where not ST_IsEmpty(geom)",
             {"t": t},
         ).fetchall()
     }
@@ -173,13 +172,13 @@ def test_polygon_shapes(db: psycopg.Connection) -> None:
     polygons beyond the Mercator limit and reaching the pole, whose whole value stays in the grid.
     """
     polygons_table(db)
-    (qk,) = db.execute("select gridtiles.qk_from_point('SRID=4326;POINT(13.405 52.52)', 16)").fetchone()
-    for z, q, fraction in [(16, qk, 1), (16, qk + 1, 0.5), (15, qk >> 2, 1), (9, qk >> 14, 0.7)]:
+    x, y = db.execute("select * from gridtiles.point_square('SRID=4326;POINT(13.405 52.52)', 16)").fetchone()
+    for z, sx, sy, fraction in [(16, x, y, 1), (16, x + 1, y, 0.5), (15, x >> 1, y >> 1, 1), (9, x >> 7, y >> 7, 0.7)]:
         db.execute(
             "insert into pop_points select ST_Multi(ST_Transform(ST_MakeEnvelope(ST_XMin(e), ST_YMin(e),"
             " ST_XMin(e) + (ST_XMax(e) - ST_XMin(e)) * %s, ST_YMax(e), 3857), 4326)), 400, 0.5, 1"
-            " from gridtiles.qk_envelope(%s, %s) e",
-            (fraction, z, q),
+            " from ST_TileEnvelope(%s, %s, %s) e",
+            (fraction, z, sx, sy),
         )
     for wkt in [
         "POLYGON((13.40 52.51, 13.41 52.52, 13.41 52.51, 13.40 52.52, 13.40 52.51))",

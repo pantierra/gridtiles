@@ -79,11 +79,11 @@ def ensure_layers(conn: psycopg.Connection) -> None:
 def sample_tiles(conn: psycopg.Connection, table: str, z: int, k: int) -> list[tuple[int, int]]:
     """Up to k distinct tiles at zoom z holding a sampled row: busy places come up more often."""
     rows = conn.execute(
-        f"select distinct gridtiles.qk_from_point(ST_PointOnSurface(geom), %s) from {table} tablesample system (0.1)"
-        " repeatable (7) limit %s",
+        f"select distinct (gridtiles.point_square(ST_PointOnSurface(geom), %s)).* from {table}"
+        " tablesample system (0.1) repeatable (7) limit %s",
         (z, k),
     ).fetchall()
-    return [tuple(conn.execute("select * from gridtiles.qk_to_xy(%s, %s)", (z, qk)).fetchone()) for (qk,) in rows]
+    return [(x, y) for x, y in rows]
 
 
 CACHE_ZOOM = 8
