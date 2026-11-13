@@ -52,8 +52,9 @@ begin
 end $$;
 
 -- The square index (_x, _y) at zoom c of each point, as SQL over `_g`, the point in EPSG:3857 or
--- 4326 (_source_sql transforms any other SRID to 4326 first). These are the float operations of
--- point_square, inlined: same operations, same squares, without a PL/pgSQL call per row.
+-- 4326 (_source_sql transforms any other SRID to 4326 first): the spherical Web Mercator formula
+-- with the latitude clamped, inlined so a tile needs no function call per row. A point on a
+-- boundary goes east / south; points beyond the edges go to the edge squares.
 create or replace function gridtiles._square_sql(srid int, c int, out sx text, out sy text)
 language plpgsql immutable strict parallel safe as $$
 declare

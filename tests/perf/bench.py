@@ -15,7 +15,7 @@ import psycopg
 from gridtiles.db import create_layer, install
 from gridtiles.spec import LayerSpec
 
-from ..conftest import ADMIN_DSN
+from ..conftest import ADMIN_DSN, POINT_SQUARE
 
 DB = "gridtiles_live_bench"
 VALUES = [
@@ -126,6 +126,7 @@ def main() -> None:
     with psycopg.connect(url, autocommit=True) as conn:
         conn.execute("drop schema if exists gridtiles cascade")  # the generated data lives in public
         install(conn)
+        conn.execute(POINT_SQUARE.read_text())  # for sample_tiles
         ensure_data(conn, args.points, args.polygons)
         ensure_layers(conn)
         print("| layer | variant | z | tiles | first ms | p50 ms | p95 ms | KiB |")

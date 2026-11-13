@@ -4,18 +4,10 @@ Functions live in the `gridtiles` schema, installed from `sql/*.sql`. Requires P
 
 ## Quadkeys
 
-Square `(x, y)` at zoom `z` is the tile `z/x/y` (XYZ addressing, y = 0 at the north edge, 0 ≤ z ≤ 30); its envelope is `ST_TileEnvelope(z, x, y)`.
-
-| Function | Returns |
-| --- | --- |
-| `quadkey(z, x, y)` | Bing quadkey: `z` base-4 digits, most significant first |
-| `point_square(geom, z)` | `(x int, y int)` of the square holding a point of any SRID; `NULL` if empty |
-
-`point_square` clamps rather than wraps: latitudes beyond the Web Mercator limit (±85.0511°) and longitudes outside ±180° map to the edge row or column. A point on a boundary belongs to the square east / south of it. Tiles assign points with the same arithmetic.
+Square `(x, y)` at zoom `z` is the tile `z/x/y` (XYZ addressing, y = 0 at the north edge, 0 ≤ z ≤ 30); its envelope is `ST_TileEnvelope(z, x, y)`. `quadkey(z, x, y)` returns its Bing quadkey, `z` base-4 digits, most significant first: the `qk` property of tile features.
 
 ```sql
-select gridtiles.quadkey(3, 3, 5);                                      -- '213'
-select * from gridtiles.point_square('SRID=4326;POINT(13.405 52.52)', 16);  -- (35208, 21492)
+select gridtiles.quadkey(3, 3, 5);  -- '213'
 ```
 
 ## Layers

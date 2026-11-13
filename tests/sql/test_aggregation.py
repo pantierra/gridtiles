@@ -1,8 +1,8 @@
 """What a tile contains, checked against brute-force queries over the source.
 
 For a sample of published tiles, every feature must match a direct aggregation of the source
-rows in its square: points by `point_square` (the PL/pgSQL function the tile query's arithmetic
-mirrors), compared bit for bit; polygons by their covered area share (`ST_Intersection` with the
+rows in its square: points by `point_square` (tests/point_square.sql, a PL/pgSQL reference of
+the tile query's arithmetic), compared bit for bit; polygons by their covered area share (`ST_Intersection` with the
 square, where tiles clip by box), compared to 1e-9.
 """
 

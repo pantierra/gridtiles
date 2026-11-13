@@ -11,6 +11,7 @@ import pytest
 from gridtiles.db import install
 
 FIXTURES = Path(__file__).parent / "fixtures"
+POINT_SQUARE = Path(__file__).parent / "point_square.sql"  # test-only reference of the point assignment
 TEST_DB = "gridtiles_test"
 ADMIN_DSN = os.environ.get("GRIDTILES_TEST_DSN", "postgresql://postgres:postgres@localhost:5439/postgres")
 
@@ -20,6 +21,7 @@ def db_conn() -> Iterator[psycopg.Connection]:
     """Recreate the test database, install the schema and yield a connection to it."""
     with psycopg.connect(fresh_database(TEST_DB), autocommit=True) as conn:
         install(conn)
+        conn.execute(POINT_SQUARE.read_text())
         yield conn
 
 
