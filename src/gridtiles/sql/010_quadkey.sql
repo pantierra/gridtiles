@@ -1,7 +1,7 @@
--- Quadkeys as integer Morton codes; mirrors src/gridtiles/quadkey.py exactly.
+-- Quadkeys as integer Morton codes.
 -- A cell is identified by (z, qk): x in the even bits, y in the odd bits, XYZ tile addressing.
--- Public qk_* functions validate their input: out of range raises SQLSTATE 22003, a non-digit
--- quadkey string raises 22P02. Internal _* helpers skip validation.
+-- Public qk_* functions validate their input: out of range raises SQLSTATE 22003. Internal _*
+-- helpers skip validation.
 -- PostgreSQL gives |, &, <<, >> equal precedence, so bit expressions are fully parenthesised.
 
 create or replace function gridtiles._check_zoom(z int, lo int default 0, hi int default 30) returns void
@@ -49,11 +49,6 @@ language sql immutable strict parallel safe as $$
     select gridtiles._spread(x) | (gridtiles._spread(y) << 1)
 $$;
 
-create or replace function gridtiles._envelope(z int, qk bigint) returns geometry
-language sql immutable strict parallel safe as $$
-    select ST_TileEnvelope(z, gridtiles._compact(qk)::int, gridtiles._compact(qk >> 1)::int)
-$$;
-
 -- EPSG:3857 metres -> cell; points on a boundary go east / south, the edges are clamped.
 create or replace function gridtiles._from_mercator(mx double precision, my double precision, z int) returns bigint
 language plpgsql immutable strict parallel safe as $$
@@ -94,44 +89,15 @@ begin
         from generate_series(0, z - 1) i;
 end $$;
 
--- Parse a quadkey string; its zoom is its length.
-create or replace function gridtiles.qk_from_text(t text) returns bigint
-language plpgsql immutable strict parallel safe as $$
-begin
-    perform gridtiles._check_zoom(length(t));
-    if t !~ '^[0-3]*$' then
-        raise exception 'quadkey % has a digit outside 0-3', quote_literal(t) using errcode = '22P02';
-    end if;
-    return coalesce(sum(substr(t, i, 1)::bigint << (2 * (length(t) - i))), 0)
-        from generate_series(1, length(t)) i;
-end $$;
-
-create or replace function gridtiles.qk_parent(z int, qk bigint, z_to int) returns bigint
-language plpgsql immutable strict parallel safe as $$
-begin
-    perform gridtiles._check_cell(z, qk);
-    perform gridtiles._check_zoom(z_to, 0, z);
-    return qk >> (2 * (z - z_to));
-end $$;
-
--- Half-open range of descendant quadkeys at zoom z_to.
-create or replace function gridtiles.qk_child_range(z int, qk bigint, z_to int) returns int8range
-language plpgsql immutable strict parallel safe as $$
-begin
-    perform gridtiles._check_cell(z, qk);
-    perform gridtiles._check_zoom(z_to, z);
-    return int8range(qk << (2 * (z_to - z)), (qk + 1) << (2 * (z_to - z)));
-end $$;
-
 create or replace function gridtiles.qk_envelope(z int, qk bigint) returns geometry(Polygon, 3857)
 language plpgsql immutable strict parallel safe as $$
 begin
     perform gridtiles._check_cell(z, qk);
-    return gridtiles._envelope(z, qk);
+    return ST_TileEnvelope(z, gridtiles._compact(qk)::int, gridtiles._compact(qk >> 1)::int);
 end $$;
 
 -- Cell containing a point of any SRID; empty -> NULL. Latitude is clamped to the Web Mercator
--- limit and projected with the same spherical formula as quadkey.from_lonlat.
+-- limit and projected with the spherical Web Mercator formula.
 create or replace function gridtiles.qk_from_point(geom geometry, z int) returns bigint
 language plpgsql immutable strict parallel safe as $$
 declare

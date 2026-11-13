@@ -17,4 +17,3 @@ def test_gridtiles_version_matches_package(db: psycopg.Connection) -> None:
 def test_install_is_idempotent(db: psycopg.Connection) -> None:
     assert install(db) == gridtiles.__version__
     assert install(db) == gridtiles.__version__
-    assert db.execute("select value from gridtiles.meta where key = 'schema_version'").fetchone() == (gridtiles.__version__,)

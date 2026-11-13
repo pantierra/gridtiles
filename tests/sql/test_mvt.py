@@ -4,8 +4,6 @@ import mercantile
 import psycopg
 import pytest
 
-from gridtiles import quadkey
-
 from ..conftest import FIXTURES
 from ..fixtures.make_fixtures import dense_block
 from .helpers import SPEC, bbox, create, features, source, tile
@@ -48,7 +46,7 @@ def test_feature_positions_and_values(block: psycopg.Connection) -> None:
     for f in features(tile(block, 12, BLOCK.x, BLOCK.y)):
         p = f["properties"]
         assert (len(p["qk"]), p["z"], p["n"], p["completeness"]) == (16, 16, 1, 0.5)
-        cx, cy = quadkey.to_xy(16, quadkey.from_text(p["qk"]))
+        cx, cy, _ = mercantile.quadkey_to_tile(p["qk"])
         x0, y0, _, _ = bbox(f)
         assert (x0 // 256, y0 // 256) == (cx - BLOCK.x * 16, cy - BLOCK.y * 16)
         assert p["population"] == list(mercantile.children(BLOCK, zoom=16)).index(mercantile.quadkey_to_tile(p["qk"]))
@@ -197,10 +195,9 @@ def test_polygon_counts_once_per_square(db: psycopg.Connection) -> None:
     """
     db.execute("create table polys (geom geometry(MultiPolygon, 3857), pop int, osm_ratio float8, area float8)")
     db.execute("create index on polys using gist (geom)")
-    qk15 = quadkey.from_lonlat(13.405, 52.52, 15)
-    db.execute("insert into polys select ST_Multi(gridtiles.qk_envelope(15, %s)), 400, 0.5, 1", (qk15,))
+    x, y, _ = mercantile.tile(13.405, 52.52, 15)
+    db.execute("insert into polys select ST_Multi(ST_TileEnvelope(15, %s, %s)), 400, 0.5, 1", (x, y))
     create(db, SPEC, "polys")
-    x, y = quadkey.to_xy(15, qk15)
     base = features(tile(db, 12, x >> 3, y >> 3))
     assert sorted((f["properties"]["n"], f["properties"]["population"]) for f in base) == [(1, pytest.approx(100))] * 4
     (coarse,) = features(tile(db, 11, x >> 4, y >> 4))

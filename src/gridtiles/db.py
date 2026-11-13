@@ -11,16 +11,12 @@ from gridtiles.spec import LayerSpec
 
 
 def install(conn: psycopg.Connection) -> str:
-    """Apply the packaged `sql/*.sql` files in order (idempotent) and record the schema version."""
+    """Apply the packaged `sql/*.sql` files in order (idempotent); returns the schema version."""
     for sql_file in sorted(files("gridtiles").joinpath("sql").iterdir(), key=lambda f: f.name):
         if sql_file.name.endswith(".sql"):
             conn.execute(sql_file.read_text())
-    row = conn.execute(
-        "insert into gridtiles.meta values ('schema_version', gridtiles.version())"
-        " on conflict (key) do update set value = excluded.value returning value"
-    ).fetchone()
-    assert row is not None
-    return str(row[0])
+    (version,) = conn.execute("select gridtiles.version()").fetchone() or ("",)
+    return str(version)
 
 
 def create_layer(conn: psycopg.Connection, spec: LayerSpec) -> None:

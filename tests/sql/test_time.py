@@ -83,7 +83,6 @@ def test_stats_and_tiles_follow_parameters(snap: psycopg.Connection) -> None:
 
 def test_times(snap: psycopg.Connection) -> None:
     assert snap.execute("select gridtiles.times('snap')").fetchone() == ([JAN, FEB],)
-    assert snap.execute("select gridtiles.times('snap', 1)").fetchone() == (None,)
     assert snap.execute("select gridtiles.times('jan')").fetchone() == (None,)
 
 

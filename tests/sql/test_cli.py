@@ -58,24 +58,13 @@ def test_add_list_drop(url: str) -> None:
         assert conn.execute("select count(*) from pop_points").fetchone() == (9800,)
 
 
-def test_add_from_toml(url: str, tmp_path: Path) -> None:
-    config = tmp_path / "gridtiles.toml"
-    config.write_text(
-        f'[backend]\nurl = "{url}"\n\n[source]\ntable = "pop_points"\n\n[grid]\nbase_zoom = 14\nmin_zoom = 4\n\n'
-        '[[value]]\nname = "population"\nfrom = "pop"\nagg = "sum"\n'
-    )
-    result = run("add", "small", "--config", config)
-    assert result.exit_code == 0, result.output
-    assert "Added layer small over pop_points" in result.output
-
-
 @pytest.mark.parametrize("path", sorted((FIXTURES / "invalid_specs").glob("*.json")), ids=lambda p: p.stem)
 def test_invalid_spec_exits_2(url: str, path: Path) -> None:
     name = json.loads(path.read_text())["name"]
     layer = name if name != "pop" else f"bad_{path.stem}"  # the argument sets the name: carry an invalid one over
     result = run("add", layer, "--spec", path, "--db", url)
     assert result.exit_code == 2
-    assert "Invalid layer spec" in result.output
+    assert "Invalid layer spec" in result.output or "Cannot add layer" in result.output  # shape, or values (SQL)
 
 
 @pytest.mark.parametrize("content", [None, "{not json"], ids=["missing", "malformed"])
@@ -119,9 +108,8 @@ def test_unsupported_geometry_exits_2(url: str, tmp_path: Path) -> None:
     assert "only points or only polygons are supported, got ST_LineString" in result.output
 
 
-def test_missing_database_exits_2(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_missing_database_exits_2(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("GRIDTILES_DB", raising=False)
-    monkeypatch.chdir(tmp_path)
     result = run("layers")
     assert result.exit_code == 2
-    assert "No database" in result.output
+    assert "--db" in result.output

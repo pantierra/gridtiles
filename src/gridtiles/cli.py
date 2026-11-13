@@ -1,12 +1,10 @@
-"""The `gridtiles` command line. Settings precedence: flags > gridtiles.toml > $GRIDTILES_DB."""
+"""The `gridtiles` command line."""
 
 import json
-import os
 import signal
 import subprocess
 import threading
 import time
-import tomllib
 from collections.abc import Callable
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -25,10 +23,7 @@ STATS_MAX_AGE = 300
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, help="Quadkey grids served as zoomable vector tiles.")
 
-Db = Annotated[
-    str | None, typer.Option("--db", help="PostgreSQL URL [default: gridtiles.toml [backend] url, then $GRIDTILES_DB]")
-]
-Config = Annotated[Path | None, typer.Option(help="Settings file [default: ./gridtiles.toml if present]")]
+Db = Annotated[str, typer.Option("--db", envvar="GRIDTILES_DB", help="PostgreSQL URL")]
 
 
 def _fail(message: str) -> NoReturn:
@@ -36,30 +31,11 @@ def _fail(message: str) -> NoReturn:
     raise typer.Exit(2)
 
 
-def _settings(path: Path | None) -> dict[str, Any]:
-    path = path or (Path("gridtiles.toml") if Path("gridtiles.toml").exists() else None)
+def _layer_spec(layer: str, spec_file: Path) -> LayerSpec:
     try:
-        return tomllib.loads(path.read_text()) if path else {}
-    except tomllib.TOMLDecodeError as e:
-        _fail(f"Invalid {path}: {e}")
-
-
-def _db_url(flag: str | None, settings: dict[str, Any]) -> str:
-    url = flag or settings.get("backend", {}).get("url") or os.environ.get("GRIDTILES_DB")
-    return url or _fail("No database: pass --db, set [backend] url in gridtiles.toml or $GRIDTILES_DB.")
-
-
-def _layer_spec(layer: str, spec_file: Path | None, settings: dict[str, Any]) -> LayerSpec:
-    """The spec of a new layer, from a JSON file or from [source], [grid] and [[value]] in gridtiles.toml."""
-    if spec_file:
-        try:
-            data = json.loads(spec_file.read_text())
-        except (OSError, json.JSONDecodeError) as e:
-            _fail(f"Cannot read layer spec {spec_file}: {e}")
-    elif "grid" in settings:
-        data = {**settings["grid"], "source": settings.get("source", {}), "values": settings.get("value", [])}
-    else:
-        _fail("No layer spec: pass --spec or a gridtiles.toml with [grid] and [[value]].")
+        data = json.loads(spec_file.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        _fail(f"Cannot read layer spec {spec_file}: {e}")
     try:
         return LayerSpec.model_validate({**data, "name": layer})
     except ValidationError as e:
@@ -88,22 +64,21 @@ class _Refreshed:
 
 
 @app.command()
-def init(db_url: Db = None, config: Config = None) -> None:
+def init(db_url: Db) -> None:
     """Install the gridtiles schema."""
-    with psycopg.connect(_db_url(db_url, _settings(config)), autocommit=True) as conn:
+    with psycopg.connect(db_url, autocommit=True) as conn:
         typer.echo(f"gridtiles schema {db.install(conn)} installed")
 
 
 @app.command("import")
 def import_(
+    db_url: Db,
     src: Path,
     table: Annotated[str, typer.Option(help="Table to create, NAME or SCHEMA.NAME")],
     replace: Annotated[bool, typer.Option(help="Drop and recreate the table if it exists")] = False,
-    db_url: Db = None,
-    config: Config = None,
 ) -> None:
     """Import a point or polygon file into a plain table with a geometry column."""
-    with psycopg.connect(_db_url(db_url, _settings(config))) as conn:
+    with psycopg.connect(db_url) as conn:
         try:
             report = import_file(conn, src, table, replace=replace)
         except (ValueError, OSError) as e:  # UnsupportedGeometry, a CRS that is no EPSG code, an existing table
@@ -113,15 +88,13 @@ def import_(
 
 @app.command()
 def add(
+    db_url: Db,
     layer: str,
-    spec: Annotated[Path | None, typer.Option(help="Layer spec JSON [default: gridtiles.toml]")] = None,
-    db_url: Db = None,
-    config: Config = None,
+    spec: Annotated[Path, typer.Option(help="Layer spec JSON")],
 ) -> None:
     """Register a layer: a live grid over the source table its spec names."""
-    settings = _settings(config)
-    layer_spec = _layer_spec(layer, spec, settings)
-    with psycopg.connect(_db_url(db_url, settings)) as conn:
+    layer_spec = _layer_spec(layer, spec)
+    with psycopg.connect(db_url) as conn:
         try:
             db.create_layer(conn, layer_spec)
         except psycopg.errors.UniqueViolation:
@@ -132,9 +105,9 @@ def add(
 
 
 @app.command()
-def drop(layer: str, db_url: Db = None, config: Config = None) -> None:
+def drop(layer: str, db_url: Db) -> None:
     """Unregister a layer; its source table stays."""
-    with psycopg.connect(_db_url(db_url, _settings(config))) as conn:
+    with psycopg.connect(db_url) as conn:
         try:
             db.drop_layer(conn, layer)
         except psycopg.errors.UndefinedObject:
@@ -142,9 +115,9 @@ def drop(layer: str, db_url: Db = None, config: Config = None) -> None:
 
 
 @app.command("layers")
-def list_layers(db_url: Db = None, config: Config = None) -> None:
+def list_layers(db_url: Db) -> None:
     """List layers with their source, zooms and published tile zooms."""
-    with psycopg.connect(_db_url(db_url, _settings(config))) as conn:
+    with psycopg.connect(db_url) as conn:
         for layer in db.layers(conn):
             s, (t0, t1) = layer.spec, layer.tile_zooms
             time = f"\ttime {s.source.time}" if s.source.time else ""
@@ -153,17 +126,16 @@ def list_layers(db_url: Db = None, config: Config = None) -> None:
 
 @app.command()
 def cache(
+    db_url: Db,
     layer: str,
     max_zoom: Annotated[int | None, typer.Option(help="Cache the squares of levels up to this zoom")] = None,
     drop: Annotated[bool, typer.Option(help="Drop the cache")] = False,
-    db_url: Db = None,
-    config: Config = None,
 ) -> None:
     """Cache or drop the coarse levels of a layer: tiles there read the cache, which lags the source
     until refreshed. Run again to refresh."""
     if (max_zoom is None) == (not drop):
         _fail("Pass --max-zoom or --drop.")
-    with psycopg.connect(_db_url(db_url, _settings(config))) as conn:
+    with psycopg.connect(db_url) as conn:
         try:
             row = conn.execute("select gridtiles.refresh_cache(%s, %s)", (layer, max_zoom)).fetchone()
         except psycopg.errors.NoDataFound:
@@ -175,14 +147,13 @@ def cache(
 
 @app.command()
 def export(
+    db_url: Db,
     layer: Annotated[str, typer.Option(help="Layer to export")],
     output: Annotated[Path, typer.Option("--output", "-o", help="PMTiles file to write")],
     at: Annotated[str | None, typer.Option(help="Time to export [default: the latest, if any]")] = None,
-    db_url: Db = None,
-    config: Config = None,
 ) -> None:
     """Export a layer to one PMTiles archive plus the viewer, for static hosting."""
-    with psycopg.connect(_db_url(db_url, _settings(config))) as conn:
+    with psycopg.connect(db_url) as conn:
         try:
             path = export_pmtiles(conn, layer, output, params={"at": at} if at else None)
         except LookupError as e:
@@ -194,16 +165,14 @@ def export(
 
 @app.command()
 def serve(
+    db_url: Db,
     layer: Annotated[list[str] | None, typer.Option(help="Layers to serve [default: all]")] = None,
     port: Annotated[int, typer.Option(help="Viewer port")] = 8080,
     martin_port: Annotated[int, typer.Option(help="Martin port")] = 3000,
     build: Annotated[Path, typer.Option(help="Directory for generated files")] = Path("build"),
-    db_url: Db = None,
-    config: Config = None,
 ) -> None:
     """Serve live tiles with Martin and the viewer, until interrupted."""
-    url = _db_url(db_url, _settings(config))
-    with psycopg.connect(url) as conn:
+    with psycopg.connect(db_url) as conn:
         try:
             layers = db.layers(conn, layer)
         except LookupError as e:
@@ -211,11 +180,11 @@ def serve(
     if not layers:
         _fail("No layers to serve: add one first.")
     names = [lay.name for lay in layers]
-    config_path = martin.write_config(build / "martin.yaml", url, layers, martin_port)
+    config_path = martin.write_config(build / "martin.yaml", db_url, layers, martin_port)
     site = viewer.write(build / "viewer", layers, lambda lay: martin.tile_url(lay, martin_port))
 
     def viewer_config() -> dict[str, Any]:
-        with psycopg.connect(url) as conn:
+        with psycopg.connect(db_url) as conn:
             fresh = db.layers(conn, names, stats=True)
         return viewer.config(fresh, lambda lay: martin.tile_url(lay, martin_port))
 

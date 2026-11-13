@@ -4,7 +4,7 @@ Functions live in the `gridtiles` schema, installed from `sql/*.sql`. Requires P
 
 ## Quadkeys
 
-A cell is identified by `(z, qk)`: `qk` is a `bigint` Morton code with x in the even bits and y in the odd bits, using XYZ tile addressing (y = 0 at the north edge, 0 ≤ z ≤ 30). Out-of-range input raises SQLSTATE `22003`; a quadkey string with a digit outside 0–3 raises `22P02`.
+A cell is identified by `(z, qk)`: `qk` is a `bigint` Morton code with x in the even bits and y in the odd bits, using XYZ tile addressing (y = 0 at the north edge, 0 ≤ z ≤ 30). Out-of-range input raises SQLSTATE `22003`.
 
 `qk_from_point` clamps rather than wraps: latitudes beyond the Web Mercator limit (±85.0511°) and longitudes outside ±180° map to the edge row or column. A point on a cell boundary belongs to the cell east / south of it.
 
@@ -13,18 +13,13 @@ A cell is identified by `(z, qk)`: `qk` is a `bigint` Morton code with x in the 
 | `qk_from_xyz(z, x, y)` | `bigint` |
 | `qk_to_xy(z, qk)` | `(x int, y int)` |
 | `qk_to_text(z, qk)` | Bing quadkey string, exactly z digits |
-| `qk_from_text(t)` | `bigint`, at zoom `length(t)` |
-| `qk_parent(z, qk, z_to)` | ancestor at `z_to ≤ z` |
-| `qk_child_range(z, qk, z_to)` | half-open `int8range` of descendants at `z_to ≥ z` |
 | `qk_envelope(z, qk)` | cell polygon in EPSG:3857 |
 | `qk_from_point(geom, z)` | cell containing a point of any SRID; `NULL` if empty |
 
 ```sql
 select gridtiles.qk_from_xyz(3, 3, 5);                       -- 39
 select gridtiles.qk_to_text(3, 39);                          -- '213'
-select * from gridtiles.qk_to_xy(3, gridtiles.qk_from_text('213'));  -- (3, 5)
-select gridtiles.qk_parent(3, 39, 1);                        -- 2
-select gridtiles.qk_child_range(1, 2, 3);                    -- [32,48)
+select * from gridtiles.qk_to_xy(3, 39);                     -- (3, 5)
 select gridtiles.qk_from_point('SRID=4326;POINT(13.405 52.52)', 16);
 select ST_AsText(gridtiles.qk_envelope(1, 1));
 ```
@@ -33,7 +28,7 @@ select ST_AsText(gridtiles.qk_envelope(1, 1));
 
 A layer is a row in `gridtiles.layers`: a source relation (table, view or materialized view) and how to aggregate it. Nothing is copied; every tile aggregates the source on request, so a committed write shows on the next request.
 
-`create_layer(spec jsonb)` validates the [layer spec](python.md#gridtilesspec) (SQLSTATE `22023` if invalid) and checks the source: a missing table raises `42P01`, a missing column `42703`, and a column of the wrong type `42804`. The geometry column must be typed `geometry(Point|Polygon|MultiPolygon, <srid>)`, values must be numeric, and the optional `time` column a `date`, `timestamp` or `timestamptz`. It also creates `tile_<name>(z, x, y, query_params json)`, the entry point for Martin. `drop_layer(name)` removes both and leaves the source alone.
+`create_layer(spec jsonb)` validates the spec (SQLSTATE `22023` if invalid): a name `^[a-z][a-z0-9_]{0,47}$`, a `source` (`table`, `geometry` default `geom`, optional `time`), `0 ≤ min_zoom ≤ base_zoom ≤ 30`, `detail` in 0–8 (default 4), values with unique names of the same pattern, a `from` column, `agg` one of `count`, `sum`, `min`, `max`, `mean`, and a `weight` column only with `mean`. Then it checks the source: a missing table raises `42P01`, a missing column `42703`, and a column of the wrong type `42804`. The geometry column must be typed `geometry(Point|Polygon|MultiPolygon, <srid>)`, values must be numeric, and the optional `time` column a `date`, `timestamp` or `timestamptz`. It also creates `tile_<name>(z, x, y, query_params json)`, the entry point for Martin. `drop_layer(name)` removes both and leaves the source alone.
 
 ```sql
 select gridtiles.create_layer('{
@@ -92,7 +87,7 @@ select length(gridtiles.mvt('pop', 12, 2200, 1343, '{"at": "2024-02-01", "diff":
 
 `stats(name, params jsonb default '{}')` aggregates the whole source at the base zoom and returns `{"stats": {...}, "bounds": [west, south, east, north]}`: per value the `min`, `max` and 7 quantile `breaks` (1/8 … 7/8) of the tile property, and for `count` and `sum` values the `total`.
 
-`times(name, max_count default 1000)` lists the distinct values of the time column as text (`null` without one or above `max_count`). `tiles_with_data(name, params default '{}')` lists `(z, x, y)` of every published tile with data.
+`times(name)` lists the distinct values of the time column as text (`null` without one or with more than 1000). `tiles_with_data(name, params default '{}')` lists `(z, x, y)` of every published tile with data.
 
 ## Cache
 

@@ -21,7 +21,6 @@ gridtiles = "gridtiles.cli:app"
 
 [dependency-groups]
 dev = [
-    "hypothesis>=6.170.14",
     "mapbox-vector-tile>=2.2.0",
     "mercantile>=1.2.1",
     "mypy",
