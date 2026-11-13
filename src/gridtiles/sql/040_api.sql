@@ -87,8 +87,8 @@ begin
         return null;
     end if;
     execute format(
-        'select array_agg(t::text order by t) from (select distinct %1$I as t from %2$s where %1$I is not null limit %3$s) d',
-        l.time_column, l.source, 1001) into result;
+        'select array_agg(t::text order by t) from (select distinct %1$I as t from %2$s where %1$I is not null limit 1001) d',
+        l.time_column, l.source) into result;
     return case when cardinality(result) > 1000 then null else coalesce(result, '{}') end;
 end $$;
 

@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 from importlib.resources import files
+from typing import Any
 
 import psycopg
 from psycopg.types.json import Jsonb
@@ -15,8 +16,7 @@ def install(conn: psycopg.Connection) -> str:
     for sql_file in sorted(files("gridtiles").joinpath("sql").iterdir(), key=lambda f: f.name):
         if sql_file.name.endswith(".sql"):
             conn.execute(sql_file.read_text())
-    (version,) = conn.execute("select gridtiles.version()").fetchone() or ("",)
-    return str(version)
+    return str(_one(conn, "select gridtiles.version()"))
 
 
 def create_layer(conn: psycopg.Connection, spec: LayerSpec) -> None:
@@ -43,9 +43,16 @@ def layers(
 
 
 def _with_stats(conn: psycopg.Connection, layer: Layer, params: dict[str, str] | None) -> Layer:
-    (times,) = conn.execute("select gridtiles.times(%s)", (layer.name,)).fetchone() or (None,)
+    times = _one(conn, "select gridtiles.times(%s)", layer.name)
     if params is None:
         params = {"at": times[-1]} if times else {}
-    (s,) = conn.execute("select gridtiles.stats(%s, %s)", (layer.name, Jsonb(params))).fetchone() or (None,)
+    s = _one(conn, "select gridtiles.stats(%s, %s)", layer.name, Jsonb(params))
     bounds = tuple(s["bounds"]) if s["bounds"] else None
     return replace(layer, stats=s["stats"], bounds=bounds, times=tuple(times) if times else None, params=params)
+
+
+def _one(conn: psycopg.Connection, query: str, *params: object) -> Any:
+    """The single value a function call returns."""
+    row = conn.execute(query, params).fetchone()
+    assert row is not None
+    return row[0]
