@@ -146,6 +146,8 @@ def cache(
             row = conn.execute("select gridtiles.refresh_cache(%s, %s)", (layer, max_zoom)).fetchone()
         except psycopg.errors.NoDataFound:
             _fail(f"Layer {layer!r} does not exist.")
+        except psycopg.errors.InvalidParameterValue as e:
+            _fail(str(e.diag.message_primary))
     typer.echo(f"Dropped the cache of {layer}" if drop else f"Cached {row and row[0]} squares of {layer} up to z{max_zoom}")
 
 

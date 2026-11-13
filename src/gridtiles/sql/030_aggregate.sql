@@ -316,6 +316,9 @@ declare
     squares bigint := 0;
 begin
     select * into strict l from gridtiles.layers where layers.name = refresh_cache.name for update;
+    if max_zoom < l.zmin then
+        raise exception 'max_zoom % is below min_zoom %', max_zoom, l.zmin using errcode = '22023';
+    end if;
     execute format('drop table if exists gridtiles.%I', tbl);
     l.cache_zoom := null;  -- build from the source, not from the old cache
     if max_zoom is not null then

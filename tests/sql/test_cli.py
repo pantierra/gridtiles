@@ -94,6 +94,7 @@ def test_cache_and_export(url: str, tmp_path: Path) -> None:
     assert result.exit_code == 0 and result.output.startswith("Cached ")
     assert run("cache", "cached", "--drop", "--db", url).output == "Dropped the cache of cached\n"
     assert run("cache", "cached", "--db", url).exit_code == 2
+    assert "below min_zoom" in run("cache", "cached", "--max-zoom", "1", "--db", url).output
     assert run("cache", "missing", "--drop", "--db", url).exit_code == 2
     result = run("export", "--layer", "cached", "-o", tmp_path / "cached.pmtiles", "--db", url)
     assert result.exit_code == 0, result.output

@@ -162,6 +162,8 @@ def test_cache(db: psycopg.Connection) -> None:
     db.execute("select gridtiles.refresh_cache('pop', 8)")
     assert tile(db, *tiles[0]) != live[0]
 
+    with pytest.raises(psycopg.errors.InvalidParameterValue, match="max_zoom 1 is below min_zoom 2"), db.transaction():
+        db.execute("select gridtiles.refresh_cache('pop', 1)")
     db.execute("select gridtiles.refresh_cache('pop', null)")
     assert db.execute("select to_regclass('gridtiles.cache_pop'), cache_zoom from gridtiles.layers").fetchone() == (
         None,
