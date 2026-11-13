@@ -28,7 +28,7 @@ spec = LayerSpec.model_validate(
 
 ## `gridtiles.export`
 
-`export_pmtiles(conn, layer, out_path, *, params=None)` writes the layer's tiles of `params` (default: all rows) to a PMTiles archive and writes the viewer next to it; exports into one folder share the viewer. `manifest(layer)` is the metadata stored under the archive's `gridtiles` key.
+`export_pmtiles(conn, layer, out_path, *, params=None)` writes the layer's tiles of `params` (default: all rows) to a PMTiles archive and writes the viewer next to it; exports into one folder share the viewer. `manifest(layer, params)` is the metadata stored under the archive's `gridtiles` key.
 
 ```python
 import psycopg

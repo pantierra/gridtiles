@@ -14,12 +14,12 @@ from gridtiles import __version__, db, viewer
 from gridtiles.layer import Layer
 
 
-def manifest(layer: Layer) -> dict[str, object]:
+def manifest(layer: Layer, params: dict[str, str]) -> dict[str, object]:
     """What a consumer needs to style and identify a layer; stored in the archive metadata."""
     return {
         "version": __version__,
         "spec": layer.spec.model_dump(mode="json", exclude_none=True),
-        "params": layer.params,
+        "params": params,
         "stats": layer.stats,
         "bounds": layer.bounds,
     }
@@ -38,15 +38,16 @@ def export_pmtiles(
     `params` (e.g. `{"at": "2024-01-01"}`; by default all rows). Exports of the same data
     are identical.
     """
+    params = params or {}
     (info,) = db.layers(conn, [layer], stats=True, params=params)
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    rows = conn.execute("select z, x, y from gridtiles.tiles_with_data(%s, %s)", (layer, Jsonb(info.params))).fetchall()
+    rows = conn.execute("select z, x, y from gridtiles.tiles_with_data(%s, %s)", (layer, Jsonb(params))).fetchall()
     with open(out, "wb") as f:
         writer = Writer(f)
         for z, x, y in sorted(rows, key=lambda t: zxy_to_tileid(*t)):  # in tile-id order: a clustered archive
             row = conn.execute(
-                "select gridtiles.mvt(%s, %s, %s, %s, %s, cached => false)", (layer, z, x, y, Jsonb(info.params))
+                "select gridtiles.mvt(%s, %s, %s, %s, %s, cached => false)", (layer, z, x, y, Jsonb(params))
             ).fetchone()
             if row and row[0]:  # a polygon touching a tile only in a sliver below float precision gives none
                 writer.write_tile(zxy_to_tileid(z, x, y), gzip.compress(bytes(row[0]), mtime=0))
@@ -70,7 +71,7 @@ def export_pmtiles(
                 "minzoom": min_zoom,
                 "maxzoom": max_zoom,
                 "vector_layers": [{"id": "cells", "minzoom": min_zoom, "maxzoom": max_zoom, "fields": _fields(info)}],
-                "gridtiles": manifest(info),
+                "gridtiles": manifest(info, params),
             },
         )
     viewer.write(out.parent, [info], lambda _: out.name, merge=True)

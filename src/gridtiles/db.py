@@ -42,10 +42,9 @@ def layers(
 
 
 def _with_stats(conn: psycopg.Connection, layer: Layer, params: dict[str, str] | None) -> Layer:
-    params = params or {}
-    s = _one(conn, "select gridtiles.stats(%s, %s)", layer.name, Jsonb(params))
+    s = _one(conn, "select gridtiles.stats(%s, %s)", layer.name, Jsonb(params or {}))
     bounds = tuple(s["bounds"]) if s["bounds"] else None
-    return replace(layer, stats=s["stats"], bounds=bounds, params=params)
+    return replace(layer, stats=s["stats"], bounds=bounds)
 
 
 def _one(conn: psycopg.Connection, query: str, *params: object) -> Any:
