@@ -14,6 +14,7 @@ import pytest
 from playwright.sync_api import Page, sync_playwright
 
 from ..conftest import FIXTURES, fresh_database
+from ..fixtures.sources import create_source
 
 pytestmark = pytest.mark.e2e
 
@@ -49,7 +50,8 @@ def journey(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
     url = fresh_database("gridtiles_e2e")
     cli = ["uv", "run", "gridtiles"]
     subprocess.run([*cli, "init", "--db", url], check=True)
-    subprocess.run([*cli, "import", str(FIXTURES / "points_10k.parquet"), "--table", "pop_points", "--db", url], check=True)
+    with psycopg.connect(url, autocommit=True) as conn:
+        create_source(conn, "points_10k")
     subprocess.run([*cli, "add", "pop", "--spec", str(FIXTURES / "spec_pop.json"), "--db", url], check=True)
     # Shown first (layers sort by name): spec text with HTML in it must reach the page as text.
     spec = json.loads((FIXTURES / "spec_pop.json").read_text())

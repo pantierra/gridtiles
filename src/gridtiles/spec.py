@@ -1,17 +1,11 @@
 """Layer spec: which source to aggregate into a layer's squares, how, and at which zooms.
 
-`gridtiles.create_layer` in SQL repeats the critical checks, so a spec is safe from either side.
+The shape only; `gridtiles.create_layer` validates the values (names, zoom ranges, aggregators).
 """
 
-from typing import Literal, Self
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
-
-from gridtiles.quadkey import MAX_ZOOM
-
-NAME_PATTERN = r"^[a-z][a-z0-9_]{0,47}$"
-
-Agg = Literal["count", "sum", "min", "max", "mean"]
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class _Model(BaseModel):
@@ -19,17 +13,11 @@ class _Model(BaseModel):
 
 
 class ValueSpec(_Model):
-    name: str = Field(pattern=NAME_PATTERN)
+    name: str
     from_: str = Field(alias="from")
-    agg: Agg
+    agg: Literal["count", "sum", "min", "max", "mean"]
     unit: str | None = None
-    weight: str | None = None
-
-    @model_validator(mode="after")
-    def _weight_only_with_mean(self) -> Self:
-        if self.weight is not None and self.agg != "mean":
-            raise ValueError(f"value {self.name!r}: weight is only allowed with agg 'mean'")
-        return self
+    weight: str | None = None  # agg mean only
 
 
 class SourceSpec(_Model):
@@ -43,18 +31,9 @@ class SourceSpec(_Model):
 
 
 class LayerSpec(_Model):
-    name: str = Field(pattern=NAME_PATTERN)
+    name: str
     source: SourceSpec
-    base_zoom: int = Field(ge=0, le=MAX_ZOOM)
-    min_zoom: int = Field(ge=0, le=MAX_ZOOM)
-    detail: int = Field(default=4, ge=0, le=8)
+    base_zoom: int
+    min_zoom: int
+    detail: int = 4
     values: tuple[ValueSpec, ...]
-
-    @model_validator(mode="after")
-    def _check(self) -> Self:
-        if self.min_zoom > self.base_zoom:
-            raise ValueError(f"min_zoom {self.min_zoom} above base_zoom {self.base_zoom}")
-        names = [v.name for v in self.values]
-        if len(names) != len(set(names)):
-            raise ValueError(f"duplicate value names in {names}")
-        return self

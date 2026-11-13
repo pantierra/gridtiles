@@ -4,10 +4,6 @@ import mercantile
 import psycopg
 import pytest
 
-from gridtiles import quadkey
-
-from ..conftest import FIXTURES
-from ..fixtures.make_fixtures import dense_block
 from .helpers import SPEC, bbox, create, features, source, tile
 
 BLOCK = mercantile.tile(13.405, 52.52, 12)
@@ -15,8 +11,7 @@ BLOCK = mercantile.tile(13.405, 52.52, 12)
 
 @pytest.fixture
 def block(db: psycopg.Connection, tmp_path: Path) -> psycopg.Connection:
-    dense_block(tmp_path / "dense_block.parquet")
-    source(db, tmp_path / "dense_block.parquet")
+    source(db, "dense_block")
     create(db, SPEC)
     return db
 
@@ -48,7 +43,7 @@ def test_feature_positions_and_values(block: psycopg.Connection) -> None:
     for f in features(tile(block, 12, BLOCK.x, BLOCK.y)):
         p = f["properties"]
         assert (len(p["qk"]), p["z"], p["n"], p["completeness"]) == (16, 16, 1, 0.5)
-        cx, cy = quadkey.to_xy(16, quadkey.from_text(p["qk"]))
+        cx, cy, _ = mercantile.quadkey_to_tile(p["qk"])
         x0, y0, _, _ = bbox(f)
         assert (x0 // 256, y0 // 256) == (cx - BLOCK.x * 16, cy - BLOCK.y * 16)
         assert p["population"] == list(mercantile.children(BLOCK, zoom=16)).index(mercantile.quadkey_to_tile(p["qk"]))
@@ -69,8 +64,7 @@ def test_empty_tile_is_zero_length(block: psycopg.Connection) -> None:
 
 
 def test_tile_below_range_clamps_to_min_zoom(db: psycopg.Connection, tmp_path: Path) -> None:
-    dense_block(tmp_path / "dense_block.parquet")
-    source(db, tmp_path / "dense_block.parquet")
+    source(db, "dense_block")
     create(db, {**SPEC, "name": "coarse", "min_zoom": 8})
     t = mercantile.tile(13.405, 52.52, 2)
     feats = features(tile(db, 2, t.x, t.y, "coarse"))
@@ -151,7 +145,7 @@ def test_malformed_parameters(block: psycopg.Connection) -> None:
 
 
 def test_cache(db: psycopg.Connection) -> None:
-    source(db, FIXTURES / "points_10k.parquet")
+    source(db, "points_10k")
     create(db, SPEC)
     tiles = [(z, *mercantile.tile(13.4, 52.5, z)[:2]) for z in range(9)]
     live = [tile(db, *t) for t in tiles]
@@ -165,7 +159,8 @@ def test_cache(db: psycopg.Connection) -> None:
     (fresh,) = db.execute("select gridtiles.mvt('pop', 0, 0, 0, '{}', cached => false)").fetchone()
     assert bytes(fresh) != live[0]
     (stats,) = db.execute("select gridtiles.stats('pop')").fetchone()
-    assert db.execute("select sum(pop) from pop_points").fetchone() == (stats["stats"]["population"]["total"],)
+    (total,) = db.execute("select sum(pop) from pop_points where geom is not null").fetchone()
+    assert stats["stats"]["population"]["total"] == total
     db.execute("select gridtiles.refresh_cache('pop', 8)")
     assert tile(db, *tiles[0]) != live[0]
 
@@ -179,7 +174,7 @@ def test_cache(db: psycopg.Connection) -> None:
 
 
 def test_cache_is_bypassed_with_parameters(db: psycopg.Connection) -> None:
-    source(db, FIXTURES / "points_small.csv")
+    source(db, "points_small")
     db.execute("alter table pop_points add column day date default '2024-01-01'")
     create(db, {**SPEC, "source": {"table": "pop_points", "time": "day"}})
     db.execute("select gridtiles.refresh_cache('pop', 16)")
@@ -197,10 +192,9 @@ def test_polygon_counts_once_per_square(db: psycopg.Connection) -> None:
     """
     db.execute("create table polys (geom geometry(MultiPolygon, 3857), pop int, osm_ratio float8, area float8)")
     db.execute("create index on polys using gist (geom)")
-    qk15 = quadkey.from_lonlat(13.405, 52.52, 15)
-    db.execute("insert into polys select ST_Multi(gridtiles.qk_envelope(15, %s)), 400, 0.5, 1", (qk15,))
+    x, y, _ = mercantile.tile(13.405, 52.52, 15)
+    db.execute("insert into polys select ST_Multi(ST_TileEnvelope(15, %s, %s)), 400, 0.5, 1", (x, y))
     create(db, SPEC, "polys")
-    x, y = quadkey.to_xy(15, qk15)
     base = features(tile(db, 12, x >> 3, y >> 3))
     assert sorted((f["properties"]["n"], f["properties"]["population"]) for f in base) == [(1, pytest.approx(100))] * 4
     (coarse,) = features(tile(db, 11, x >> 4, y >> 4))

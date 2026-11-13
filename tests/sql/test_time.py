@@ -7,7 +7,6 @@ import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 
-from ..conftest import FIXTURES
 from .helpers import SPEC, SPEC_MINMAX, create, features, source, tile
 
 JAN, FEB = "2024-01-01", "2024-02-01"
@@ -18,7 +17,7 @@ T8 = mercantile.tile(13.4, 52.5, 8)
 @pytest.fixture
 def snap(db: psycopg.Connection) -> psycopg.Connection:
     """Two snapshots of the 10k points: in February, every third point is gone and the rest doubled."""
-    source(db, FIXTURES / "points_10k.parquet")
+    source(db, "points_10k")
     db.execute(
         f"create table snap as select geom, pop, osm_ratio, area, date '{JAN}' as day from pop_points"
         f" union all select geom, pop * 2, osm_ratio, area, date '{FEB}' from pop_points where pop % 3 <> 0"
@@ -83,12 +82,11 @@ def test_stats_and_tiles_follow_parameters(snap: psycopg.Connection) -> None:
 
 def test_times(snap: psycopg.Connection) -> None:
     assert snap.execute("select gridtiles.times('snap')").fetchone() == ([JAN, FEB],)
-    assert snap.execute("select gridtiles.times('snap', 1)").fetchone() == (None,)
     assert snap.execute("select gridtiles.times('jan')").fetchone() == (None,)
 
 
 def test_timestamp_column(db: psycopg.Connection) -> None:
-    source(db, FIXTURES / "points_small.csv")
+    source(db, "points_small")
     db.execute("alter table pop_points add column seen timestamptz")
     db.execute(
         "update pop_points set seen = case when pop <= 40"
@@ -146,7 +144,7 @@ def test_snapshot_query_uses_the_time_index(snap: psycopg.Connection) -> None:
 
 
 def test_polygon_diff(db: psycopg.Connection) -> None:
-    source(db, FIXTURES / "polygons_500.gpkg", "polys")
+    source(db, "polygons_500", "polys")
     db.execute(
         f"create table snap as select geom, pop, osm_ratio, area, date '{JAN}' as day from polys"
         f" union all select geom, pop + 1, osm_ratio, area, date '{FEB}' from polys where pop % 2 = 0"

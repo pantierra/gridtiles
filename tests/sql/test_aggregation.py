@@ -13,8 +13,6 @@ from pathlib import Path
 import psycopg
 import pytest
 
-from ..conftest import FIXTURES
-from ..fixtures.make_fixtures import dense_block
 from .helpers import SPEC_MINMAX, create, features, source, tile
 
 SPEC = {**SPEC_MINMAX, "min_zoom": 0}  # population (sum), completeness (mean by area), pop_min, pop_max
@@ -97,20 +95,19 @@ def assert_point_layer(db: psycopg.Connection, spec: dict = SPEC) -> None:
 
 
 def test_points_10k(db: psycopg.Connection) -> None:
-    source(db, FIXTURES / "points_10k.parquet")  # 2% null geometries
+    source(db, "points_10k")  # 2% null geometries
     create(db, SPEC)
     assert_point_layer(db)
 
 
 def test_points_small(db: psycopg.Connection) -> None:
-    source(db, FIXTURES / "points_small.csv")  # one point without osm_ratio
+    source(db, "points_small")  # one point without osm_ratio
     create(db, SPEC)
     assert_point_layer(db)
 
 
 def test_dense_block(db: psycopg.Connection, tmp_path: Path) -> None:
-    dense_block(tmp_path / "dense_block.parquet")
-    source(db, tmp_path / "dense_block.parquet")
+    source(db, "dense_block")
     create(db, SPEC)
     assert_point_layer(db)
 
@@ -118,7 +115,7 @@ def test_dense_block(db: psycopg.Connection, tmp_path: Path) -> None:
 @pytest.mark.parametrize("srid", [3857, 25833])
 def test_points_other_srids(db: psycopg.Connection, srid: int) -> None:
     """EPSG:3857 is read as is; any other SRID through its transform to 4326."""
-    source(db, FIXTURES / "points_10k.parquet", "wgs84")
+    source(db, "points_10k", "wgs84")
     db.execute(
         f"create table pop_points as select ST_Transform(geom, {srid})::geometry(Point, {srid}) as geom,"
         " pop, osm_ratio, area from wgs84"
@@ -157,14 +154,14 @@ def polygons_table(db: psycopg.Connection, srid: int = 4326) -> None:
 
 
 def test_polygons_500(db: psycopg.Connection) -> None:
-    source(db, FIXTURES / "polygons_500.gpkg")
+    source(db, "polygons_500")
     create(db, SPEC)
     assert_tiles(db, SPEC, "polygon")
 
 
 @pytest.mark.parametrize("srid", [3857, 25833])
 def test_polygons_other_srids(db: psycopg.Connection, srid: int) -> None:
-    source(db, FIXTURES / "polygons_500.gpkg", "wgs84")
+    source(db, "polygons_500", "wgs84")
     polygons_table(db, srid)
     db.execute(f"insert into pop_points select ST_Transform(geom, {srid}), pop, osm_ratio, area from wgs84")
     create(db, {**SPEC, "min_zoom": 8})

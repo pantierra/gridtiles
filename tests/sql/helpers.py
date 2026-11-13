@@ -1,15 +1,13 @@
-"""Shared test helpers: source tables from fixture files, layers over them."""
+"""Shared test helpers: source tables, layers over them, tiles."""
 
 import json
-from os import PathLike
 
 import mapbox_vector_tile
 import psycopg
 from psycopg.types.json import Jsonb
 
-from gridtiles.importer import ImportReport, import_file
-
 from ..conftest import FIXTURES
+from ..fixtures.sources import create_source
 
 SPEC = json.loads((FIXTURES / "spec_pop.json").read_text())
 SPEC_MINMAX = {
@@ -20,8 +18,8 @@ SPEC_MINMAX = {
 }
 
 
-def source(db: psycopg.Connection, path: str | PathLike[str], table: str = "pop_points") -> ImportReport:
-    return import_file(db, path, table)
+def source(db: psycopg.Connection, name: str, table: str = "pop_points") -> None:
+    create_source(db, name, table)
 
 
 def create(db: psycopg.Connection, spec: dict, table: str | None = None) -> None:

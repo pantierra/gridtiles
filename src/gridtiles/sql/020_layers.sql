@@ -1,6 +1,6 @@
 -- Layer registry: a layer is a named view over a source relation with a geometry column. Nothing
--- is copied; tiles aggregate the source on request (040_mvt.sql). Spec checks mirror
--- src/gridtiles/spec.py; an invalid spec raises SQLSTATE 22023.
+-- is copied; tiles aggregate the source on request (040_api.sql). Spec checks live here (spec.py
+-- only describes the shape); an invalid spec raises SQLSTATE 22023.
 
 create table if not exists gridtiles.layers (
     name text primary key check (name ~ '^[a-z][a-z0-9_]{0,47}$'),

@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 from importlib.resources import files
+from typing import Any
 
 import psycopg
 from psycopg.types.json import Jsonb
@@ -11,26 +12,16 @@ from gridtiles.spec import LayerSpec
 
 
 def install(conn: psycopg.Connection) -> str:
-    """Apply the packaged `sql/*.sql` files in order (idempotent) and record the schema version."""
+    """Apply the packaged `sql/*.sql` files in order (idempotent); returns the schema version."""
     for sql_file in sorted(files("gridtiles").joinpath("sql").iterdir(), key=lambda f: f.name):
         if sql_file.name.endswith(".sql"):
             conn.execute(sql_file.read_text())
-    row = conn.execute(
-        "insert into gridtiles.meta values ('schema_version', gridtiles.version())"
-        " on conflict (key) do update set value = excluded.value returning value"
-    ).fetchone()
-    assert row is not None
-    return str(row[0])
+    return str(_one(conn, "select gridtiles.version()"))
 
 
 def create_layer(conn: psycopg.Connection, spec: LayerSpec) -> None:
     """Register a layer over its source table; checks the source (see `gridtiles.create_layer`)."""
     conn.execute("select gridtiles.create_layer(%s)", (Jsonb(spec.model_dump(mode="json", exclude_none=True)),))
-
-
-def drop_layer(conn: psycopg.Connection, name: str) -> None:
-    """Unregister a layer; its source table is left alone."""
-    conn.execute("select gridtiles.drop_layer(%s)", (name,))
 
 
 def layers(
@@ -52,9 +43,16 @@ def layers(
 
 
 def _with_stats(conn: psycopg.Connection, layer: Layer, params: dict[str, str] | None) -> Layer:
-    (times,) = conn.execute("select gridtiles.times(%s)", (layer.name,)).fetchone() or (None,)
+    times = _one(conn, "select gridtiles.times(%s)", layer.name)
     if params is None:
         params = {"at": times[-1]} if times else {}
-    (s,) = conn.execute("select gridtiles.stats(%s, %s)", (layer.name, Jsonb(params))).fetchone() or (None,)
+    s = _one(conn, "select gridtiles.stats(%s, %s)", layer.name, Jsonb(params))
     bounds = tuple(s["bounds"]) if s["bounds"] else None
     return replace(layer, stats=s["stats"], bounds=bounds, times=tuple(times) if times else None, params=params)
+
+
+def _one(conn: psycopg.Connection, query: str, *params: object) -> Any:
+    """The single value a function call returns."""
+    row = conn.execute(query, params).fetchone()
+    assert row is not None
+    return row[0]
