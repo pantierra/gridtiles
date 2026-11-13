@@ -28,8 +28,8 @@ Any tool that writes a PostGIS table with a typed geometry column works as a sou
 
 `serve` writes `build/martin.yaml` (one function source `tile_<name>` per layer, serving the published tile zooms, with Martin's tile cache off so tiles follow the source) and `build/viewer/`, then runs a local `martin` binary, or the pinned Martin Docker image on the host network when there is none. `--port`, `--martin-port` and `--build` change the defaults.
 
-Both servers listen on `127.0.0.1` only. `build/martin.yaml` holds the database URL including its password, so keep `--build` out of version control and shared folders. Docker host networking needs Linux; on macOS or Windows, install a local `martin` binary. The viewer loads MapLibre and the PMTiles reader from unpkg (pinned, with subresource integrity), so it needs internet access.
+Both servers listen on `127.0.0.1` only. `build/martin.yaml` holds the database URL including its password, so keep `--build` out of version control and shared folders. Docker host networking needs Linux; on macOS or Windows, install a local `martin` binary. The viewer loads MapLibre and the PMTiles reader from unpkg (pinned, with subresource integrity) and the basemap from OpenFreeMap, so it needs internet access.
 
 ## Viewer
 
-The viewer styles the layer's first value in 8 classes on the `stats` breakpoints, which `serve` recomputes at most every 5 minutes. Sums and counts are shown per base cell (`value / 4^(base_zoom - z)`), so the base-zoom breakpoints hold at every zoom. Hovering a cell shows its quadkey, zoom, `n` and values. With several layers, a selector switches between them.
+The viewer draws the squares over a light basemap ([OpenFreeMap](https://openfreemap.org) Positron, no API key), below its place names, and styles the layer's first value in 8 classes: quantile breaks of the squares on screen, recomputed after each move, so every zoom shows contrast (colours are relative to the view). It opens on the layer's bounds. Hovering a square shows its quadkey, zoom, `n` and values. With several layers, a selector switches between them.

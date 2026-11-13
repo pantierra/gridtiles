@@ -152,10 +152,14 @@ def test_hover_shows_quadkey(page: Page) -> None:
     assert page.locator("#injected").count() == 0
 
 
-def test_legend_shows_breakpoints(page: Page) -> None:
+def test_legend_follows_the_view(page: Page) -> None:
+    """Colour classes come from the squares on screen: the legend shows their quantile breaks."""
+    page.wait_for_function("window.breaks && window.breaks.length === 7")
     classes = page.locator("#legend .class")
     assert classes.count() == 8
-    first = page.evaluate(
-        "window.current.stats.population.breaks[0].toLocaleString(undefined, {maximumSignificantDigits: 4})"
-    )
+    first = page.evaluate("window.breaks[0].toLocaleString(undefined, {maximumSignificantDigits: 4})")
     assert first in classes.nth(0).inner_text()
+    values = page.evaluate(
+        "window.map.queryRenderedFeatures({layers: ['cells']}).map((f) => f.properties.population).sort((a, b) => a - b)"
+    )
+    assert values[0] <= page.evaluate("window.breaks[0]") <= page.evaluate("window.breaks[6]") <= values[-1]
