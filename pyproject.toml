@@ -1,6 +1,6 @@
 [project]
 name = "gridtiles"
-version = "0.1.0"
+version = "0.1.1"
 description = "Serve PostGIS points and polygons as a quadkey grid of vector tiles, aggregated live"
 readme = "README.md"
 license = "MIT"

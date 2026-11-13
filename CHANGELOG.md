@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.1](https://github.com/pantierra/gridtiles/compare/gridtiles-v0.1.0...gridtiles-v0.1.1) (2026-11-13)
+
+
+### Features
+
+* choose the value that colours the map; demo on live aggregation ([#35](https://github.com/pantierra/gridtiles/issues/35)) ([6cc5f2a](https://github.com/pantierra/gridtiles/commit/6cc5f2a333c9c74eddedec87a9f7c3bcf550616d))
+* viewer colours follow the view, light basemap, README demo ([#32](https://github.com/pantierra/gridtiles/issues/32)) ([4efa997](https://github.com/pantierra/gridtiles/commit/4efa997d6f59fa995e93233a7095edc85052c9b9))
+
 ## 0.1.0 (2026-11-13)
 
 
