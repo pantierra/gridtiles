@@ -27,9 +27,8 @@ def create_layer(conn: psycopg.Connection, spec: LayerSpec) -> None:
 def layers(
     conn: psycopg.Connection, names: list[str] | None = None, *, stats: bool = False, params: dict[str, str] | None = None
 ) -> list[Layer]:
-    """Registered layers, all or the named ones. With `stats`, each also gets the values of its
-    time column and its stats and bounds (`gridtiles.stats`, which aggregates the whole source) for
-    the tiles of `params`, by default the latest time of a layer with one.
+    """Registered layers, all or the named ones. With `stats`, each also gets its stats and bounds
+    (`gridtiles.stats`, which aggregates the whole source) for the tiles of `params`.
     """
     rows = conn.execute(
         "select spec from gridtiles.layers where %(names)s::text[] is null or name = any(%(names)s) order by name",
@@ -43,12 +42,10 @@ def layers(
 
 
 def _with_stats(conn: psycopg.Connection, layer: Layer, params: dict[str, str] | None) -> Layer:
-    times = _one(conn, "select gridtiles.times(%s)", layer.name)
-    if params is None:
-        params = {"at": times[-1]} if times else {}
+    params = params or {}
     s = _one(conn, "select gridtiles.stats(%s, %s)", layer.name, Jsonb(params))
     bounds = tuple(s["bounds"]) if s["bounds"] else None
-    return replace(layer, stats=s["stats"], bounds=bounds, times=tuple(times) if times else None, params=params)
+    return replace(layer, stats=s["stats"], bounds=bounds, params=params)
 
 
 def _one(conn: psycopg.Connection, query: str, *params: object) -> Any:

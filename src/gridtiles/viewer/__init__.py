@@ -16,9 +16,7 @@ from gridtiles.layer import Layer
 
 
 def config(layers: list[Layer], tiles: Callable[[Layer], str]) -> dict[str, Any]:
-    """`tiles` gives each layer's XYZ URL template or PMTiles path. On XYZ sources the viewer adds
-    `params` as the URL query, and offers a time slider over `times`.
-    """
+    """`tiles` gives each layer's XYZ URL template or PMTiles path."""
     return {
         "layers": [
             {
@@ -30,8 +28,6 @@ def config(layers: list[Layer], tiles: Callable[[Layer], str]) -> dict[str, Any]
                 "bounds": layer.bounds,
                 "values": [{"name": v.name, "agg": v.agg, "unit": v.unit} for v in layer.spec.values],
                 "stats": layer.stats,
-                "times": list(layer.times) if layer.times is not None else None,
-                "params": layer.params,
             }
             for layer in layers
         ]

@@ -1,4 +1,4 @@
--- Public functions: vector tiles, stats, time values, the tiles with data, and the cache.
+-- Public functions: vector tiles, stats, the tiles with data, and the cache.
 
 -- MVT encoder: a tile at zoom z carries the squares at c = clamp(z + detail, zmin, zb), the source
 -- aggregated into them on request, filtered by the parameters (see _time_filter). For c >= z
@@ -74,24 +74,6 @@ begin
         l.zb, gridtiles._aggregate_sql(l, l.zb, 0, 0, 0, params, false)
     ) into result;
     return result;
-end $$;
-
--- The distinct values of a layer's time column, ascending, as text; NULL without a time column or
--- with more than 1000 values.
-create or replace function gridtiles.times(name text) returns text[]
-language plpgsql stable parallel safe as $$
-declare
-    l gridtiles.layers;
-    result text[];
-begin
-    select * into strict l from gridtiles.layers where layers.name = times.name;
-    if l.time_column is null then
-        return null;
-    end if;
-    execute format(
-        'select array_agg(t::text order by t) from (select distinct %1$I as t from %2$s where %1$I is not null limit 1001) d',
-        l.time_column, l.source) into result;
-    return case when cardinality(result) > 1000 then null else coalesce(result, '{}') end;
 end $$;
 
 -- Every tile with data in the published zoom range [max(0, zmin - detail), max(0, zb - detail)]:

@@ -2,7 +2,6 @@
 
 import gzip
 import math
-from dataclasses import replace
 from os import PathLike
 from pathlib import Path
 
@@ -36,11 +35,10 @@ def export_pmtiles(
     """Write every tile with data in the published zoom range to a PMTiles archive (gzip-compressed
     MVT), with `index.html` and `config.json` next to it; layers exported into the same folder
     share the viewer. The archive is a snapshot of the source at export time, of the tiles of
-    `params` (by default the latest time of a layer with a time column). Exports of the same data
+    `params` (e.g. `{"at": "2024-01-01"}`; by default all rows). Exports of the same data
     are identical.
     """
-    (fresh,) = db.layers(conn, [layer], stats=True, params=params)
-    info = replace(fresh, times=None)  # one point in time; the static viewer has no time slider
+    (info,) = db.layers(conn, [layer], stats=True, params=params)
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     rows = conn.execute("select z, x, y from gridtiles.tiles_with_data(%s, %s)", (layer, Jsonb(info.params))).fetchall()

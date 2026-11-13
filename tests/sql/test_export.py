@@ -102,7 +102,7 @@ def test_exports_share_a_folder(tmp_path: Path) -> None:
 
 
 def test_export_of_a_time(tmp_path: Path) -> None:
-    """A layer with a time column exports the latest time unless told otherwise."""
+    """A layer with a time column exports all rows, or one time with `at`."""
     url = fresh_database("gridtiles_export_time")
     spec = LayerSpec.model_validate_json((FIXTURES / "spec_pop.json").read_text())
     with psycopg.connect(url) as conn:
@@ -112,10 +112,9 @@ def test_export_of_a_time(tmp_path: Path) -> None:
         conn.execute("update pop_points set day = case when pop <= 40 then date '2024-01-01' else date '2024-02-01' end")
         db.create_layer(conn, spec.model_copy(update={"source": spec.source.model_copy(update={"time": "day"})}))
     with psycopg.connect(url) as conn:
-        latest = export_pmtiles(conn, "pop", tmp_path / "latest" / "pop.pmtiles")
+        everything = export_pmtiles(conn, "pop", tmp_path / "all" / "pop.pmtiles")
         first = export_pmtiles(conn, "pop", tmp_path / "first" / "pop.pmtiles", params={"at": "2024-01-01"})
-    for path, at, total in ((latest, "2024-02-01", 50 + 60 + 70 + 80), (first, "2024-01-01", 10 + 20 + 30 + 40)):
+    for path, params, total in ((everything, {}, 360), (first, {"at": "2024-01-01"}, 10 + 20 + 30 + 40)):
         meta = reader(path).metadata()["gridtiles"]
-        assert meta["params"] == {"at": at}
+        assert meta["params"] == params
         assert meta["stats"]["population"]["total"] == total
-        assert json.loads((path.parent / "config.json").read_text())["layers"][0]["times"] is None

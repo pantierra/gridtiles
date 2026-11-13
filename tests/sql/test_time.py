@@ -80,11 +80,6 @@ def test_stats_and_tiles_follow_parameters(snap: psycopg.Connection) -> None:
     assert tiles == snap.execute("select * from gridtiles.tiles_with_data('feb')").fetchall()
 
 
-def test_times(snap: psycopg.Connection) -> None:
-    assert snap.execute("select gridtiles.times('snap')").fetchone() == ([JAN, FEB],)
-    assert snap.execute("select gridtiles.times('jan')").fetchone() == (None,)
-
-
 def test_timestamp_column(db: psycopg.Connection) -> None:
     source(db, "points_small")
     db.execute("alter table pop_points add column seen timestamptz")
