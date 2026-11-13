@@ -142,13 +142,15 @@ language sql immutable strict parallel safe as $$
     from (select ST_CollectionExtract(ST_MakeValid(geom), 3) as valid) v
 $$;
 
--- Tile index range at zoom z covered by the bounding box of an EPSG:3857 geometry.
+-- Tile index range at zoom z covered by the bounding box of an EPSG:3857 geometry, widened by 1 mm:
+-- offset by half the world width, a coordinate's float spacing is several nanometres, so an edge
+-- just across a square boundary would round onto it. Squares only touched have no area and drop out.
 create or replace function gridtiles._bbox_tile_range(g geometry, z int, out x0 int, out x1 int, out y0 int, out y1 int)
 language sql immutable strict parallel safe as $$
-    select greatest(floor((ST_XMin(g) + 20037508.342789244) / size)::int, 0),
-           least(floor((ST_XMax(g) + 20037508.342789244) / size)::int, top),
-           greatest(floor((20037508.342789244 - ST_YMax(g)) / size)::int, 0),
-           least(floor((20037508.342789244 - ST_YMin(g)) / size)::int, top)
+    select greatest(floor((ST_XMin(g) - 0.001 + 20037508.342789244) / size)::int, 0),
+           least(floor((ST_XMax(g) + 0.001 + 20037508.342789244) / size)::int, top),
+           greatest(floor((20037508.342789244 - ST_YMax(g) - 0.001) / size)::int, 0),
+           least(floor((20037508.342789244 - ST_YMin(g) + 0.001) / size)::int, top)
     from (select 40075016.68557849::double precision / (1::bigint << z) as size, (1 << z) - 1 as top) k
 $$;
 
