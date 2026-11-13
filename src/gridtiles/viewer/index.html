@@ -30,7 +30,8 @@
     const PALETTE = ["#ffffd9", "#edf8b1", "#c7e9b4", "#7fcdbb", "#41b6c4", "#1d91c0", "#225ea8", "#0c2c84"];
     const map = (window.map = new maplibregl.Map({
       container: "map",
-      style: { version: 8, sources: {}, layers: [{ id: "background", type: "background", paint: { "background-color": "#f4f4f2" } }] },
+      // OpenFreeMap Positron: a light basemap without an API key; squares go below its labels.
+      style: "https://tiles.openfreemap.org/styles/positron",
       center: [0, 0],
       zoom: 1,
     }));
@@ -43,38 +44,51 @@
       return { type: "vector", tiles: [layer.tiles], minzoom: layer.minzoom, maxzoom: layer.maxzoom };
     }
 
-    function show(layer) {
-      for (const id of ["cells", "outlines"]) if (map.getLayer(id)) map.removeLayer(id);
-      if (map.getSource("cells")) map.removeSource("cells");
-      // Style the first value; count values live in the tile property `n`. The breakpoints come from
-      // the base zoom, so additive values are compared per base cell: value / 4^(base_zoom - z).
-      const value = layer.values[0];
-      const additive = value.agg === "sum" || value.agg === "count";
-      const get = ["get", value.agg === "count" ? "n" : value.name];
-      const input = additive ? ["/", get, ["^", 4, ["-", layer.base_zoom, ["get", "z"]]]] : get;
-      const breaks = layer.stats?.[value.name]?.breaks ?? [];
-      const step = ["step", input, PALETTE[0]];
-      let last = -Infinity; // step stops must increase strictly; equal breakpoints merge classes
+    // The styled value: the first one; count values live in the tile property `n`.
+    const styled = (layer) => (layer.values[0].agg === "count" ? "n" : layer.values[0].name);
+
+    // Colour classes from the squares on screen: 7 quantile breaks, recomputed after each move, so
+    // every zoom shows contrast. Equal breaks merge classes (step stops must increase strictly).
+    function restyle() {
+      const layer = window.current;
+      if (!layer || !map.getLayer("cells")) return;
+      const key = styled(layer);
+      const values = map.queryRenderedFeatures({ layers: ["cells"] })
+        .map((f) => f.properties[key]).filter((v) => typeof v === "number").sort((a, b) => a - b);
+      const breaks = values.length ? [1, 2, 3, 4, 5, 6, 7].map((i) => values[Math.floor((i * values.length) / 8)]) : [];
+      if (JSON.stringify(breaks) === JSON.stringify(window.breaks)) return;
+      window.breaks = breaks;
+      const step = ["step", ["get", key], PALETTE[0]];
+      let last = -Infinity;
       breaks.forEach((b, i) => { if (b > last) step.push((last = b), PALETTE[i + 1]); });
-
-      map.addSource("cells", source(layer));
-      map.addLayer({ id: "cells", type: "fill", source: "cells", "source-layer": "cells",
-                     paint: { "fill-color": step.length > 3 ? step : PALETTE[4], "fill-opacity": 0.7 } });
-      map.addLayer({ id: "outlines", type: "line", source: "cells", "source-layer": "cells",
-                     minzoom: Math.max(0, layer.base_zoom - 2), paint: { "line-color": "#0003", "line-width": 0.5 } });
-
-      const unit = value.unit ? ` ${value.unit}` : "";
-      const per = additive ? ` per z${layer.base_zoom} cell` : "";
-      document.getElementById("title").textContent = `${layer.name}: ${value.name}${unit}${per}`;
+      map.setPaintProperty("cells", "fill-color", step.length > 3 ? step : PALETTE[4]);
       const edges = [null, ...breaks, null];
       document.getElementById("legend").innerHTML = PALETTE.map((colour, i) => {
         const [lo, hi] = [edges[i], edges[i + 1]];
         const label = esc(lo === null ? `< ${fmt(hi)}` : hi === null ? `≥ ${fmt(lo)}` : `${fmt(lo)} – ${fmt(hi)}`);
         return `<div class="class"><span style="background:${colour}"></span>${label}</div>`;
       }).join("");
-      if (layer.bounds) map.fitBounds(layer.bounds, { padding: 20, animate: false });
-      window.current = layer;
     }
+
+    function show(layer) {
+      for (const id of ["cells", "outlines"]) if (map.getLayer(id)) map.removeLayer(id);
+      if (map.getSource("cells")) map.removeSource("cells");
+      const labels = map.getStyle().layers.find((l) => l.type === "symbol")?.id;
+      map.addSource("cells", source(layer));
+      map.addLayer({ id: "cells", type: "fill", source: "cells", "source-layer": "cells",
+                     paint: { "fill-color": PALETTE[4], "fill-opacity": 0.75 } }, labels);
+      map.addLayer({ id: "outlines", type: "line", source: "cells", "source-layer": "cells",
+                     minzoom: Math.max(0, layer.base_zoom - 2), paint: { "line-color": "#0003", "line-width": 0.5 } }, labels);
+      const value = layer.values[0];
+      const unit = value.unit ? ` (${value.unit})` : "";
+      document.getElementById("title").textContent = `${layer.name}: ${value.name}${unit} per square`;
+      window.breaks = null;  // colour classes follow once the squares are drawn (restyle)
+      document.getElementById("legend").innerHTML = "";
+      window.current = layer;
+      if (layer.bounds) map.fitBounds(layer.bounds, { padding: 20, animate: false });
+    }
+
+    map.on("idle", restyle);
 
     map.on("mousemove", "cells", (e) => {
       const p = e.features[0].properties;

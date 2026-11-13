@@ -4,6 +4,10 @@
 
 Serve any PostGIS table of points or polygons as a quadkey grid of zoomable vector tiles, aggregated live on every request. [Why a quadkey grid?](docs/concept.md)
 
+![The viewer on 1 million points and 14,000 polygons: monthly snapshots, zooming, hovering, a live insert and polygons](docs/demo.gif)
+
+One million points and 14,000 polygons in PostGIS, aggregated on each tile request: a time slider over monthly snapshots (`?at=`), squares cut fresh at every zoom, a live `INSERT` that shows on the next request, and polygons split over squares by covered area.
+
 ## Installation
 
 ```bash
