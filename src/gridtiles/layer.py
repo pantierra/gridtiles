@@ -1,6 +1,6 @@
 """A registered layer as consumers (tile server, viewer, exporters) see it."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from gridtiles.spec import LayerSpec
@@ -11,8 +11,6 @@ class Layer:
     spec: LayerSpec
     stats: dict[str, Any] | None = None  # per value: total, min, max, breaks (from gridtiles.stats)
     bounds: tuple[float, float, float, float] | None = None  # WGS84 [west, south, east, north] of the base squares
-    times: tuple[str, ...] | None = None  # distinct values of the source's time column, ascending
-    params: dict[str, str] = field(default_factory=dict)  # tile parameters the stats describe: the latest time
 
     @property
     def name(self) -> str:

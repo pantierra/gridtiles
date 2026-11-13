@@ -100,7 +100,7 @@ def export(
     db_url: Db,
     layer: Annotated[str, typer.Option(help="Layer to export")],
     output: Annotated[Path, typer.Option("--output", "-o", help="PMTiles file to write")],
-    at: Annotated[str | None, typer.Option(help="Time to export [default: the latest, if any]")] = None,
+    at: Annotated[str | None, typer.Option(help="Time to export (the at parameter) [default: all rows]")] = None,
 ) -> None:
     """Export a layer to one PMTiles archive plus the viewer, for static hosting."""
     with psycopg.connect(db_url) as conn:

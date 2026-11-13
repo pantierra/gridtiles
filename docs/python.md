@@ -24,11 +24,11 @@ spec = LayerSpec.model_validate(
 | --- | --- |
 | `install(conn)` | Install the SQL; returns the schema version |
 | `create_layer(conn, spec)` | Register a layer (see [sql.md](sql.md#layers)); `gridtiles.drop_layer(name)` in SQL removes one |
-| `layers(conn, names=None, *, stats=False, params=None)` | Registered layers; with `stats`, also their stats and bounds, time values and the parameters the stats describe (default: the latest time) |
+| `layers(conn, names=None, *, stats=False, params=None)` | Registered layers; with `stats`, also their stats and bounds for the tiles of `params` |
 
 ## `gridtiles.export`
 
-`export_pmtiles(conn, layer, out_path, *, params=None)` writes the layer's tiles of `params` (default: the latest time, if any) to a PMTiles archive and writes the viewer next to it; exports into one folder share the viewer. `manifest(layer)` is the metadata stored under the archive's `gridtiles` key.
+`export_pmtiles(conn, layer, out_path, *, params=None)` writes the layer's tiles of `params` (default: all rows) to a PMTiles archive and writes the viewer next to it; exports into one folder share the viewer. `manifest(layer, params)` is the metadata stored under the archive's `gridtiles` key.
 
 ```python
 import psycopg

@@ -32,4 +32,4 @@ Both servers listen on `127.0.0.1` only. `build/martin.yaml` holds the database 
 
 ## Viewer
 
-The viewer styles the layer's first value in 8 classes on the `stats` breakpoints, which `serve` recomputes at most every 5 minutes. On a layer with a time column, it shows the latest time and a slider over the others. Sums and counts are shown per base cell (`value / 4^(base_zoom - z)`), so the base-zoom breakpoints hold at every zoom. Hovering a cell shows its quadkey, zoom, `n` and values. With several layers, a selector switches between them.
+The viewer styles the layer's first value in 8 classes on the `stats` breakpoints, which `serve` recomputes at most every 5 minutes. Sums and counts are shown per base cell (`value / 4^(base_zoom - z)`), so the base-zoom breakpoints hold at every zoom. Hovering a cell shows its quadkey, zoom, `n` and values. With several layers, a selector switches between them.

@@ -59,17 +59,6 @@ def journey(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
     html_spec = tmp_path_factory.mktemp("spec") / "html.json"
     html_spec.write_text(json.dumps(spec))
     subprocess.run([*cli, "add", "html", "--spec", str(html_spec), "--db", url], check=True)
-    # Two snapshots in one table: in February every third point is gone and the rest doubled.
-    with psycopg.connect(url, autocommit=True) as conn:
-        conn.execute(
-            "create table snap as select geom, pop, osm_ratio, area, date '2024-01-01' as day from pop_points"
-            " union all select geom, pop * 2, osm_ratio, area, date '2024-02-01' from pop_points where pop % 3 <> 0"
-        )
-        conn.execute("create index on snap using gist (geom)")
-    spec["source"] = {"table": "snap", "time": "day"}
-    snap_spec = tmp_path_factory.mktemp("spec") / "snap.json"
-    snap_spec.write_text(json.dumps(spec))
-    subprocess.run([*cli, "add", "snap", "--spec", str(snap_spec), "--db", url], check=True)
     build = tmp_path_factory.mktemp("build")
     serve = [
         *cli,
@@ -170,23 +159,3 @@ def test_legend_shows_breakpoints(page: Page) -> None:
         "window.current.stats.population.breaks[0].toLocaleString(undefined, {maximumSignificantDigits: 4})"
     )
     assert first in classes.nth(0).inner_text()
-
-
-def test_time_slider(page: Page) -> None:
-    """The snap layer opens at its latest time; the slider moves its tiles to another."""
-    page.select_option("#layer", label="snap")
-    page.wait_for_function("window.current.name === 'snap' && window.map.loaded() && window.map.areTilesLoaded()")
-    assert page.is_visible("#time")
-    assert page.inner_text("#at-label") == "2024-02-01"
-    assert page.evaluate("window.map.getSource('cells').tiles[0]").endswith("?at=2024-02-01")
-    latest = page.evaluate("window.map.queryRenderedFeatures({layers: ['cells']}).length")
-
-    page.evaluate("""() => {
-        const slider = document.getElementById("at");
-        slider.value = 0;
-        slider.dispatchEvent(new Event("input"));
-    }""")
-    page.wait_for_function("window.map.getSource('cells').tiles[0].endsWith('?at=2024-01-01')")
-    page.wait_for_function("window.map.loaded() && window.map.areTilesLoaded()")
-    assert page.inner_text("#at-label") == "2024-01-01"
-    assert page.evaluate("window.map.queryRenderedFeatures({layers: ['cells']}).length") >= latest > 0

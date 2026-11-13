@@ -14,12 +14,12 @@ from gridtiles.viewer import _Refreshed
 
 from ..conftest import FIXTURES
 
-LAYER = Layer(LayerSpec.model_validate_json((FIXTURES / "spec_pop.json").read_text()), times=("2024-01-01",))
+LAYER = Layer(LayerSpec.model_validate_json((FIXTURES / "spec_pop.json").read_text()))
 
 
 def test_config() -> None:
     (entry,) = viewer.config([LAYER], lambda layer: f"/tiles/{layer.name}")["layers"]
-    assert (entry["tiles"], entry["minzoom"], entry["maxzoom"], entry["times"]) == ("/tiles/pop", 0, 12, ["2024-01-01"])
+    assert (entry["tiles"], entry["minzoom"], entry["maxzoom"]) == ("/tiles/pop", 0, 12)
 
 
 def test_config_json_is_built_per_request(tmp_path: Path) -> None:

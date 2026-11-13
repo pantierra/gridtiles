@@ -73,7 +73,7 @@ select length(gridtiles.mvt('pop', 12, 2200, 1343, '{"at": "2024-02-01", "diff":
 
 `stats(name, params jsonb default '{}')` aggregates the whole source at the base zoom and returns `{"stats": {...}, "bounds": [west, south, east, north]}`: per value the `min`, `max` and 7 quantile `breaks` (1/8 … 7/8) of the tile property, and for `count` and `sum` values the `total`.
 
-`times(name)` lists the distinct values of the time column as text (`null` without one or with more than 1000). `tiles_with_data(name, params default '{}')` lists `(z, x, y)` of every published tile with data.
+`tiles_with_data(name, params default '{}')` lists `(z, x, y)` of every published tile with data.
 
 ## Cache
 
