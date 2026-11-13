@@ -10,9 +10,7 @@ requires-python = ">=3.12"
 dependencies = [
     "pmtiles>=3.8.1",
     "psycopg[binary]>=3.2",
-    "pyarrow>=26.0.0",
     "pydantic>=2.14.2",
-    "pyogrio>=0.13.0",
     "typer>=0.27.3",
 ]
 
@@ -45,13 +43,9 @@ strict = true
 files = ["src"]
 
 [[tool.mypy.overrides]]
-module = ["pyarrow.*", "pyogrio.*"]
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
 module = ["gridtiles.export"]  # pmtiles ships no type annotations
 disallow_untyped_calls = false
 
 [tool.pytest.ini_options]
-addopts = "-m 'not e2e and not perf'"
-markers = ["e2e: needs the compose services, including Martin", "perf: nightly performance runs"]
+addopts = "-m 'not e2e'"
+markers = ["e2e: needs the compose services, including Martin"]

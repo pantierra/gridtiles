@@ -24,11 +24,6 @@ def create_layer(conn: psycopg.Connection, spec: LayerSpec) -> None:
     conn.execute("select gridtiles.create_layer(%s)", (Jsonb(spec.model_dump(mode="json", exclude_none=True)),))
 
 
-def drop_layer(conn: psycopg.Connection, name: str) -> None:
-    """Unregister a layer; its source table is left alone."""
-    conn.execute("select gridtiles.drop_layer(%s)", (name,))
-
-
 def layers(
     conn: psycopg.Connection, names: list[str] | None = None, *, stats: bool = False, params: dict[str, str] | None = None
 ) -> list[Layer]:

@@ -12,7 +12,7 @@ from .helpers import SPEC, create, source
 
 @pytest.fixture
 def points(db: psycopg.Connection) -> psycopg.Connection:
-    source(db, FIXTURES / "points_small.csv")
+    source(db, "points_small")
     return db
 
 

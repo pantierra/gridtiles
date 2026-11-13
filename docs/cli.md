@@ -5,24 +5,24 @@ Every command takes `--db URL`, by default `$GRIDTILES_DB`.
 | Command | Does |
 | --- | --- |
 | `gridtiles init` | Install the schema (idempotent) |
-| `gridtiles import SRC --table NAME [--replace]` | Import a point or polygon file into a plain table |
 | `gridtiles add LAYER --spec FILE` | Register a layer over the table its JSON spec names |
-| `gridtiles drop LAYER` | Unregister a layer; the table stays |
 | `gridtiles layers` | List layers with source, zooms and published tile zooms |
 | `gridtiles cache LAYER --max-zoom N \| --drop` | Cache or drop the coarse levels of a layer (see [sql.md](sql.md#cache)); run again to refresh |
 | `gridtiles serve [--layer NAME ...]` | Serve live tiles with Martin and the viewer until interrupted |
 | `gridtiles export --layer NAME -o FILE.pmtiles [--at V]` | Write a PMTiles archive plus `index.html` and `config.json` next to it |
 
-An invalid or unreadable spec, a missing or unusable source, a missing database, an unsupported geometry or an existing table on `import` exits with status 2, as does `serve` when Martin exits on its own (e.g. on a bad database URL or a busy port).
+An invalid or unreadable spec, a missing or unusable source or a missing database exits with status 2, as does `serve` when Martin exits on its own (e.g. on a bad database URL or a busy port).
 
 ```bash
 export GRIDTILES_DB=postgresql://postgres:postgres@localhost:5439/postgres
 gridtiles init
-gridtiles import tests/fixtures/points_10k.parquet --table pop_points
+ogr2ogr -f PostgreSQL "PG:$GRIDTILES_DB" points.gpkg -nln pop_points -lco GEOMETRY_NAME=geom
 gridtiles add pop --spec tests/fixtures/spec_pop.json
 gridtiles serve    # viewer on http://localhost:8080, tiles on http://localhost:3000
 gridtiles export --layer pop -o site/pop.pmtiles
 ```
+
+Any tool that writes a PostGIS table with a typed geometry column works as a source. ogr2ogr types the column from the file and creates the spatial index; for polygons, add `-nlt MULTIPOLYGON` so polygons and multipolygons share one type.
 
 `export` writes every tile with data in the published zoom range (gzip-compressed MVT) to one archive whose metadata holds the layer manifest (`gridtiles`: version, spec, params, stats, bounds). It is a snapshot of the source at export time. Upload the folder to any static host that answers HTTP range requests (S3, R2, GitHub Pages; Python's `http.server` does not). Exports of the same data are byte-identical.
 

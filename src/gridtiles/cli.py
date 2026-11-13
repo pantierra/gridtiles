@@ -16,7 +16,6 @@ from pydantic import ValidationError
 
 from gridtiles import db, martin, viewer
 from gridtiles.export import export_pmtiles
-from gridtiles.importer import import_file
 from gridtiles.spec import LayerSpec
 
 STATS_MAX_AGE = 300
@@ -70,22 +69,6 @@ def init(db_url: Db) -> None:
         typer.echo(f"gridtiles schema {db.install(conn)} installed")
 
 
-@app.command("import")
-def import_(
-    db_url: Db,
-    src: Path,
-    table: Annotated[str, typer.Option(help="Table to create, NAME or SCHEMA.NAME")],
-    replace: Annotated[bool, typer.Option(help="Drop and recreate the table if it exists")] = False,
-) -> None:
-    """Import a point or polygon file into a plain table with a geometry column."""
-    with psycopg.connect(db_url) as conn:
-        try:
-            report = import_file(conn, src, table, replace=replace)
-        except (ValueError, OSError) as e:  # UnsupportedGeometry, a CRS that is no EPSG code, an existing table
-            _fail(str(e))
-        typer.echo(report)
-
-
 @app.command()
 def add(
     db_url: Db,
@@ -102,16 +85,6 @@ def add(
         except psycopg.Error as e:  # the source is missing or has the wrong column types
             _fail(f"Cannot add layer {layer!r}: {e.diag.message_primary}")
     typer.echo(f"Added layer {layer} over {layer_spec.source.table}")
-
-
-@app.command()
-def drop(layer: str, db_url: Db) -> None:
-    """Unregister a layer; its source table stays."""
-    with psycopg.connect(db_url) as conn:
-        try:
-            db.drop_layer(conn, layer)
-        except psycopg.errors.UndefinedObject:
-            _fail(f"Layer {layer!r} does not exist.")
 
 
 @app.command("layers")

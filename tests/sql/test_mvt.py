@@ -4,8 +4,6 @@ import mercantile
 import psycopg
 import pytest
 
-from ..conftest import FIXTURES
-from ..fixtures.make_fixtures import dense_block
 from .helpers import SPEC, bbox, create, features, source, tile
 
 BLOCK = mercantile.tile(13.405, 52.52, 12)
@@ -13,8 +11,7 @@ BLOCK = mercantile.tile(13.405, 52.52, 12)
 
 @pytest.fixture
 def block(db: psycopg.Connection, tmp_path: Path) -> psycopg.Connection:
-    dense_block(tmp_path / "dense_block.parquet")
-    source(db, tmp_path / "dense_block.parquet")
+    source(db, "dense_block")
     create(db, SPEC)
     return db
 
@@ -67,8 +64,7 @@ def test_empty_tile_is_zero_length(block: psycopg.Connection) -> None:
 
 
 def test_tile_below_range_clamps_to_min_zoom(db: psycopg.Connection, tmp_path: Path) -> None:
-    dense_block(tmp_path / "dense_block.parquet")
-    source(db, tmp_path / "dense_block.parquet")
+    source(db, "dense_block")
     create(db, {**SPEC, "name": "coarse", "min_zoom": 8})
     t = mercantile.tile(13.405, 52.52, 2)
     feats = features(tile(db, 2, t.x, t.y, "coarse"))
@@ -149,7 +145,7 @@ def test_malformed_parameters(block: psycopg.Connection) -> None:
 
 
 def test_cache(db: psycopg.Connection) -> None:
-    source(db, FIXTURES / "points_10k.parquet")
+    source(db, "points_10k")
     create(db, SPEC)
     tiles = [(z, *mercantile.tile(13.4, 52.5, z)[:2]) for z in range(9)]
     live = [tile(db, *t) for t in tiles]
@@ -163,7 +159,8 @@ def test_cache(db: psycopg.Connection) -> None:
     (fresh,) = db.execute("select gridtiles.mvt('pop', 0, 0, 0, '{}', cached => false)").fetchone()
     assert bytes(fresh) != live[0]
     (stats,) = db.execute("select gridtiles.stats('pop')").fetchone()
-    assert db.execute("select sum(pop) from pop_points").fetchone() == (stats["stats"]["population"]["total"],)
+    (total,) = db.execute("select sum(pop) from pop_points where geom is not null").fetchone()
+    assert stats["stats"]["population"]["total"] == total
     db.execute("select gridtiles.refresh_cache('pop', 8)")
     assert tile(db, *tiles[0]) != live[0]
 
@@ -177,7 +174,7 @@ def test_cache(db: psycopg.Connection) -> None:
 
 
 def test_cache_is_bypassed_with_parameters(db: psycopg.Connection) -> None:
-    source(db, FIXTURES / "points_small.csv")
+    source(db, "points_small")
     db.execute("alter table pop_points add column day date default '2024-01-01'")
     create(db, {**SPEC, "source": {"table": "pop_points", "time": "day"}})
     db.execute("select gridtiles.refresh_cache('pop', 16)")

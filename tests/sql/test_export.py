@@ -10,10 +10,10 @@ from pmtiles.tile import TileType
 
 from gridtiles import db
 from gridtiles.export import export_pmtiles
-from gridtiles.importer import import_file
 from gridtiles.spec import LayerSpec
 
 from ..conftest import FIXTURES, fresh_database
+from ..fixtures.sources import create_source
 
 
 @pytest.fixture(scope="module")
@@ -22,7 +22,7 @@ def exported(tmp_path_factory: pytest.TempPathFactory) -> tuple[str, Path]:
     url = fresh_database("gridtiles_export")
     with psycopg.connect(url) as conn:
         db.install(conn)
-        import_file(conn, FIXTURES / "points_10k.parquet", "pop_points")
+        create_source(conn, "points_10k")
         db.create_layer(conn, LayerSpec.model_validate_json((FIXTURES / "spec_pop.json").read_text()))
     with psycopg.connect(url) as conn:
         path = export_pmtiles(conn, "pop", tmp_path_factory.mktemp("site") / "pop.pmtiles")
@@ -88,7 +88,7 @@ def test_exports_share_a_folder(tmp_path: Path) -> None:
     spec = LayerSpec.model_validate_json((FIXTURES / "spec_pop.json").read_text())
     with psycopg.connect(url) as conn:
         db.install(conn)
-        import_file(conn, FIXTURES / "points_small.csv", "pop_points")
+        create_source(conn, "points_small")
         for name in ("pop", "other"):
             db.create_layer(conn, spec.model_copy(update={"name": name}))
     with psycopg.connect(url) as conn:
@@ -107,7 +107,7 @@ def test_export_of_a_time(tmp_path: Path) -> None:
     spec = LayerSpec.model_validate_json((FIXTURES / "spec_pop.json").read_text())
     with psycopg.connect(url) as conn:
         db.install(conn)
-        import_file(conn, FIXTURES / "points_small.csv", "pop_points")
+        create_source(conn, "points_small")
         conn.execute("alter table pop_points add column day date")
         conn.execute("update pop_points set day = case when pop <= 40 then date '2024-01-01' else date '2024-02-01' end")
         db.create_layer(conn, spec.model_copy(update={"source": spec.source.model_copy(update={"time": "day"})}))

@@ -8,6 +8,7 @@ from typer.testing import CliRunner
 from gridtiles.cli import app
 
 from ..conftest import FIXTURES, fresh_database
+from ..fixtures.sources import create_source
 
 runner = CliRunner()
 
@@ -16,7 +17,8 @@ runner = CliRunner()
 def url() -> str:
     url = fresh_database("gridtiles_cli")
     assert run("init", "--db", url).exit_code == 0
-    assert run("import", FIXTURES / "points_10k.parquet", "--table", "pop_points", "--db", url).exit_code == 0
+    with psycopg.connect(url, autocommit=True) as conn:
+        create_source(conn, "points_10k")
     return url
 
 
@@ -27,7 +29,7 @@ def run(*args: str | Path):
 def test_help_lists_commands() -> None:
     result = run("--help")
     assert result.exit_code == 0
-    for command in ("init", "import", "add", "drop", "layers", "cache", "serve", "export"):
+    for command in ("init", "add", "layers", "cache", "serve", "export"):
         assert command in result.output
     assert "load" not in result.output
 
@@ -36,26 +38,13 @@ def test_init_again(url: str) -> None:
     assert run("init", "--db", url).exit_code == 0
 
 
-def test_import_report(url: str) -> None:
-    result = run("import", FIXTURES / "points_small.csv", "--table", "small", "--db", url)
-    assert result.exit_code == 0, result.output
-    assert "ImportReport(records_read=8, records_imported=8" in result.output
-    again = run("import", FIXTURES / "points_small.csv", "--table", "small", "--db", url)
-    assert again.exit_code == 2 and "exists" in again.output
-    assert run("import", FIXTURES / "points_small.csv", "--table", "small", "--replace", "--db", url).exit_code == 0
-
-
-def test_add_list_drop(url: str) -> None:
+def test_add_and_list(url: str) -> None:
     result = run("add", "pop", "--spec", FIXTURES / "spec_pop.json", "--db", url)
     assert result.exit_code == 0, result.output
     listing = run("layers", "--db", url)
     assert listing.exit_code == 0
     assert listing.output == "pop\tpop_points\tz2-16\tdetail 4\ttiles z0-12\n"
     assert run("add", "pop", "--spec", FIXTURES / "spec_pop.json", "--db", url).exit_code == 2
-    assert run("drop", "pop", "--db", url).exit_code == 0
-    assert run("drop", "pop", "--db", url).exit_code == 2
-    with psycopg.connect(url) as conn:
-        assert conn.execute("select count(*) from pop_points").fetchone() == (9800,)
 
 
 @pytest.mark.parametrize("path", sorted((FIXTURES / "invalid_specs").glob("*.json")), ids=lambda p: p.stem)
@@ -97,15 +86,6 @@ def test_bad_source_exits_2(url: str, tmp_path: Path) -> None:
     result = run("add", "nosource", "--spec", spec, "--db", url)
     assert result.exit_code == 2
     assert 'source table "missing" does not exist' in result.output
-
-
-def test_unsupported_geometry_exits_2(url: str, tmp_path: Path) -> None:
-    path = tmp_path / "line.geojson"
-    line = {"type": "Feature", "properties": {}, "geometry": {"type": "LineString", "coordinates": [[0, 0], [1, 1]]}}
-    path.write_text(json.dumps({"type": "FeatureCollection", "features": [line]}))
-    result = run("import", path, "--table", "lines", "--db", url)
-    assert result.exit_code == 2
-    assert "only points or only polygons are supported, got ST_LineString" in result.output
 
 
 def test_missing_database_exits_2(monkeypatch: pytest.MonkeyPatch) -> None:

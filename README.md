@@ -17,9 +17,9 @@ With PostgreSQL + PostGIS running (`make up` starts one on port 5439):
 ```bash
 export GRIDTILES_DB=postgresql://postgres:postgres@localhost:5439/postgres
 gridtiles init
-gridtiles import points.parquet --table pop_points   # or use any table with a geometry column
-gridtiles add pop --spec spec.json                   # spec.json names the source table and values
-gridtiles serve                                      # open http://localhost:8080
+ogr2ogr -f PostgreSQL "PG:$GRIDTILES_DB" points.gpkg -nln pop_points -lco GEOMETRY_NAME=geom  # or any table with a geometry column
+gridtiles add pop --spec spec.json   # spec.json names the source table and values
+gridtiles serve                      # open http://localhost:8080
 ```
 
 ## Documentation
