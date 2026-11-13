@@ -6,4 +6,4 @@ create schema if not exists gridtiles;
 
 create or replace function gridtiles.version() returns text
 language sql immutable parallel safe
-as $$ select '0.1.0' $$; -- x-release-please-version
+as $$ select '0.1.1' $$; -- x-release-please-version
