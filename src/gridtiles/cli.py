@@ -5,9 +5,10 @@ import os
 import signal
 import subprocess
 import threading
+import time
 import tomllib
-from functools import partial
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from collections.abc import Callable
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Annotated, Any, NoReturn
 
@@ -17,9 +18,10 @@ from pydantic import ValidationError
 
 from gridtiles import db, martin, viewer
 from gridtiles.export import export_pmtiles
-from gridtiles.ingest import MAX_CELLS_PER_FEATURE, CellLimitExceeded
-from gridtiles.ingest import load as load_source
+from gridtiles.importer import import_file
 from gridtiles.spec import LayerSpec
+
+STATS_MAX_AGE = 300
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, help="Quadkey grids served as zoomable vector tiles.")
 
@@ -48,78 +50,145 @@ def _db_url(flag: str | None, settings: dict[str, Any]) -> str:
 
 
 def _layer_spec(layer: str, spec_file: Path | None, settings: dict[str, Any]) -> LayerSpec:
-    """The spec of a new layer, from a JSON file or from [grid] and [[value]] in gridtiles.toml."""
+    """The spec of a new layer, from a JSON file or from [source], [grid] and [[value]] in gridtiles.toml."""
     if spec_file:
         try:
             data = json.loads(spec_file.read_text())
         except (OSError, json.JSONDecodeError) as e:
             _fail(f"Cannot read layer spec {spec_file}: {e}")
     elif "grid" in settings:
-        data = {**settings["grid"], "values": settings.get("value", [])}
+        data = {**settings["grid"], "source": settings.get("source", {}), "values": settings.get("value", [])}
     else:
-        _fail(f"Layer {layer!r} does not exist: pass --spec or a gridtiles.toml with [grid] and [[value]].")
+        _fail("No layer spec: pass --spec or a gridtiles.toml with [grid] and [[value]].")
     try:
         return LayerSpec.model_validate({**data, "name": layer})
     except ValidationError as e:
         _fail(f"Invalid layer spec:\n{e}")
 
 
+class _Refreshed:
+    """`build()`, rebuilt at most every `seconds` by one thread at a time; the last result while a
+    rebuild fails."""
+
+    def __init__(self, build: Callable[[], dict[str, Any]], seconds: float) -> None:
+        self.build, self.seconds = build, seconds
+        self.lock = threading.Lock()
+        self.value: dict[str, Any] | None = None
+        self.at = 0.0
+
+    def __call__(self) -> dict[str, Any]:
+        with self.lock:
+            if self.value is None or time.monotonic() - self.at > self.seconds:
+                try:
+                    self.value, self.at = self.build(), time.monotonic()
+                except psycopg.Error:
+                    if self.value is None:
+                        raise
+            return self.value
+
+
 @app.command()
 def init(db_url: Db = None, config: Config = None) -> None:
-    """Install or upgrade the gridtiles schema."""
+    """Install the gridtiles schema."""
     with psycopg.connect(_db_url(db_url, _settings(config)), autocommit=True) as conn:
         typer.echo(f"gridtiles schema {db.install(conn)} installed")
 
 
-@app.command()
-def load(
+@app.command("import")
+def import_(
     src: Path,
-    layer: Annotated[str, typer.Option(help="Layer name; created if absent")],
-    spec: Annotated[Path | None, typer.Option(help="Layer spec JSON for a new layer")] = None,
-    force: Annotated[
-        bool, typer.Option(help=f"Allow polygons spanning more than {MAX_CELLS_PER_FEATURE:,} base cells")
-    ] = False,
+    table: Annotated[str, typer.Option(help="Table to create, NAME or SCHEMA.NAME")],
+    replace: Annotated[bool, typer.Option(help="Drop and recreate the table if it exists")] = False,
     db_url: Db = None,
     config: Config = None,
 ) -> None:
-    """Load points, polygons or a raster into a layer and roll it up."""
-    settings = _settings(config)
-    with psycopg.connect(_db_url(db_url, settings)) as conn:
+    """Import a point or polygon file into a plain table with a geometry column."""
+    with psycopg.connect(_db_url(db_url, _settings(config))) as conn:
         try:
-            db.layer_spec(conn, layer)
-        except LookupError:
-            db.create_layer(conn, _layer_spec(layer, spec, settings))
-        try:
-            report = load_source(conn, layer, src, max_cells_per_feature=None if force else MAX_CELLS_PER_FEATURE)
-        except CellLimitExceeded as e:
-            _fail(f"{e} (use --force)")
-        except ValueError as e:  # UnsupportedGeometry, raster CRS or pixel size, source columns
+            report = import_file(conn, src, table, replace=replace)
+        except (ValueError, OSError) as e:  # UnsupportedGeometry, a CRS that is no EPSG code, an existing table
             _fail(str(e))
         typer.echo(report)
 
 
+@app.command()
+def add(
+    layer: str,
+    spec: Annotated[Path | None, typer.Option(help="Layer spec JSON [default: gridtiles.toml]")] = None,
+    db_url: Db = None,
+    config: Config = None,
+) -> None:
+    """Register a layer: a live grid over the source table its spec names."""
+    settings = _settings(config)
+    layer_spec = _layer_spec(layer, spec, settings)
+    with psycopg.connect(_db_url(db_url, settings)) as conn:
+        try:
+            db.create_layer(conn, layer_spec)
+        except psycopg.errors.UniqueViolation:
+            _fail(f"Layer {layer!r} exists.")
+        except psycopg.Error as e:  # the source is missing or has the wrong column types
+            _fail(f"Cannot add layer {layer!r}: {e.diag.message_primary}")
+    typer.echo(f"Added layer {layer} over {layer_spec.source.table}")
+
+
+@app.command()
+def drop(layer: str, db_url: Db = None, config: Config = None) -> None:
+    """Unregister a layer; its source table stays."""
+    with psycopg.connect(_db_url(db_url, _settings(config))) as conn:
+        try:
+            db.drop_layer(conn, layer)
+        except psycopg.errors.UndefinedObject:
+            _fail(f"Layer {layer!r} does not exist.")
+
+
 @app.command("layers")
 def list_layers(db_url: Db = None, config: Config = None) -> None:
-    """List layers with their zooms and cell counts."""
+    """List layers with their source, zooms and published tile zooms."""
     with psycopg.connect(_db_url(db_url, _settings(config))) as conn:
         for layer in db.layers(conn):
             s, (t0, t1) = layer.spec, layer.tile_zooms
-            typer.echo(f"{s.name}\tz{s.min_zoom}-{s.base_zoom}\tdetail {s.detail}\ttiles z{t0}-{t1}\t{layer.cells} cells")
+            time = f"\ttime {s.source.time}" if s.source.time else ""
+            typer.echo(f"{s.name}\t{s.source.table}\tz{s.min_zoom}-{s.base_zoom}\tdetail {s.detail}\ttiles z{t0}-{t1}{time}")
+
+
+@app.command()
+def cache(
+    layer: str,
+    max_zoom: Annotated[int | None, typer.Option(help="Cache the squares of levels up to this zoom")] = None,
+    drop: Annotated[bool, typer.Option(help="Drop the cache")] = False,
+    db_url: Db = None,
+    config: Config = None,
+) -> None:
+    """Cache or drop the coarse levels of a layer: tiles there read the cache, which lags the source
+    until refreshed. Run again to refresh."""
+    if (max_zoom is None) == (not drop):
+        _fail("Pass --max-zoom or --drop.")
+    with psycopg.connect(_db_url(db_url, _settings(config))) as conn:
+        try:
+            row = conn.execute("select gridtiles.refresh_cache(%s, %s)", (layer, max_zoom)).fetchone()
+        except psycopg.errors.NoDataFound:
+            _fail(f"Layer {layer!r} does not exist.")
+        except psycopg.errors.InvalidParameterValue as e:
+            _fail(str(e.diag.message_primary))
+    typer.echo(f"Dropped the cache of {layer}" if drop else f"Cached {row and row[0]} squares of {layer} up to z{max_zoom}")
 
 
 @app.command()
 def export(
     layer: Annotated[str, typer.Option(help="Layer to export")],
     output: Annotated[Path, typer.Option("--output", "-o", help="PMTiles file to write")],
+    at: Annotated[str | None, typer.Option(help="Time to export [default: the latest, if any]")] = None,
     db_url: Db = None,
     config: Config = None,
 ) -> None:
     """Export a layer to one PMTiles archive plus the viewer, for static hosting."""
     with psycopg.connect(_db_url(db_url, _settings(config))) as conn:
         try:
-            path = export_pmtiles(conn, layer, output)
+            path = export_pmtiles(conn, layer, output, params={"at": at} if at else None)
         except LookupError as e:
             _fail(str(e))
+        except psycopg.errors.InvalidParameterValue as e:
+            _fail(str(e.diag.message_primary))
     typer.echo(f"Wrote {path} with index.html and config.json in {path.parent}")
 
 
@@ -135,18 +204,27 @@ def serve(
     """Serve live tiles with Martin and the viewer, until interrupted."""
     url = _db_url(db_url, _settings(config))
     with psycopg.connect(url) as conn:
-        layers = db.layers(conn, layer)
+        try:
+            layers = db.layers(conn, layer)
+        except LookupError as e:
+            _fail(str(e))
     if not layers:
-        _fail("No layers to serve: load one first.")
+        _fail("No layers to serve: add one first.")
+    names = [lay.name for lay in layers]
     config_path = martin.write_config(build / "martin.yaml", url, layers, martin_port)
     site = viewer.write(build / "viewer", layers, lambda lay: martin.tile_url(lay, martin_port))
+
+    def viewer_config() -> dict[str, Any]:
+        with psycopg.connect(url) as conn:
+            fresh = db.layers(conn, names, stats=True)
+        return viewer.config(fresh, lambda lay: martin.tile_url(lay, martin_port))
 
     def stop(*_: object) -> None:
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, stop)
     tiles = subprocess.Popen(martin.command(config_path))
-    server = ThreadingHTTPServer(("127.0.0.1", port), partial(SimpleHTTPRequestHandler, directory=site))
+    server = ThreadingHTTPServer(("127.0.0.1", port), viewer.handler(site, _Refreshed(viewer_config, STATS_MAX_AGE)))
     threading.Thread(target=server.serve_forever, daemon=True).start()
     typer.echo(f"Viewer on http://localhost:{port}, tiles on http://localhost:{martin_port}")
     try:

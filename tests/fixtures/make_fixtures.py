@@ -11,12 +11,9 @@ from collections import defaultdict
 from pathlib import Path
 
 import mercantile
-import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pyogrio
-import rasterio
-from rasterio.transform import from_origin
 
 HERE = Path(__file__).parent
 BERLIN = (13.08, 52.33, 13.76, 52.68)  # lon_min, lat_min, lon_max, lat_max
@@ -130,26 +127,7 @@ def polygons_500() -> None:
     write_vector(path, columns, wkb)
 
 
-def raster_100() -> None:
-    """100 x 100 EPSG:3857 pixels of 5 m near Berlin; value = row * 100 + col; 5-pixel nodata border."""
-    data = (np.arange(100)[:, None] * 100 + np.arange(100)[None, :]).astype("int32")
-    data[:5, :] = data[-5:, :] = data[:, :5] = data[:, -5:] = -9999
-    profile = {
-        "driver": "GTiff",
-        "width": 100,
-        "height": 100,
-        "count": 1,
-        "dtype": "int32",
-        "crs": "EPSG:3857",
-        "transform": from_origin(1492000.3, 6894000.7, 5, 5),
-        "nodata": -9999,
-    }
-    with rasterio.open(HERE / "raster_100.tif", "w", **profile) as dst:
-        dst.write(data, 1)
-
-
 if __name__ == "__main__":
     points_small()
     points_10k()
     polygons_500()
-    raster_100()

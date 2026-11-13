@@ -3,8 +3,8 @@
 import gzip
 import math
 import threading
-from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from itertools import batched
 from os import PathLike
 from pathlib import Path
@@ -13,8 +13,8 @@ from typing import Self
 import psycopg
 from pmtiles.tile import Compression, TileType, zxy_to_tileid
 from pmtiles.writer import Writer
-from psycopg import sql
 from psycopg.conninfo import make_conninfo
+from psycopg.types.json import Jsonb
 
 from gridtiles import __version__, db, viewer
 from gridtiles.layer import Layer
@@ -27,25 +27,39 @@ def manifest(layer: Layer) -> dict[str, object]:
     return {
         "version": __version__,
         "spec": layer.spec.model_dump(mode="json", exclude_none=True),
+        "params": layer.params,
         "stats": layer.stats,
         "bounds": layer.bounds,
     }
 
 
-def export_pmtiles(conn: psycopg.Connection, layer: str, out_path: str | PathLike[str], *, workers: int = 4) -> Path:
+def export_pmtiles(
+    conn: psycopg.Connection,
+    layer: str,
+    out_path: str | PathLike[str],
+    *,
+    params: dict[str, str] | None = None,
+    workers: int = 4,
+) -> Path:
     """Write every tile with data in the published zoom range to a PMTiles archive (gzip-compressed
-    MVT), with `index.html` and `config.json` next to it. Exports of the same data are identical.
+    MVT), with `index.html` and `config.json` next to it; layers exported into the same folder
+    share the viewer. The archive is a snapshot of the source at export time, of the tiles of
+    `params` (by default the latest time of a layer with a time column). Exports of the same data
+    are identical.
     """
-    (info,) = db.layers(conn, [layer])
+    (fresh,) = db.layers(conn, [layer], stats=True, params=params)
+    info = replace(fresh, times=None)  # one point in time; the static viewer has no time slider
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    tiles = sorted(_tiles_with_data(conn, info), key=lambda t: zxy_to_tileid(*t))
-    with open(out, "wb") as f, _TileFetcher(conn, layer) as fetch, ThreadPoolExecutor(workers) as pool:
+    rows = conn.execute("select z, x, y from gridtiles.tiles_with_data(%s, %s)", (layer, Jsonb(info.params))).fetchall()
+    tiles = sorted(rows, key=lambda t: zxy_to_tileid(*t))
+    with open(out, "wb") as f, _TileFetcher(conn, layer, info.params) as fetch, ThreadPoolExecutor(workers) as pool:
         writer = Writer(f)
         # map() yields batches in order, so tiles are written clustered while workers fetch ahead.
         for batch in pool.map(fetch, batched(tiles, BATCH)):
             for (z, x, y), data in batch:
-                writer.write_tile(zxy_to_tileid(z, x, y), gzip.compress(data, mtime=0))
+                if data:  # a polygon touching a tile only in a sliver below float precision
+                    writer.write_tile(zxy_to_tileid(z, x, y), gzip.compress(data, mtime=0))
         west, south, east, north = info.bounds or (-180.0, -85.0511287798, 180.0, 85.0511287798)
         min_zoom, max_zoom = info.tile_zooms
         writer.finalize(
@@ -69,28 +83,17 @@ def export_pmtiles(conn: psycopg.Connection, layer: str, out_path: str | PathLik
                 "gridtiles": manifest(info),
             },
         )
-    viewer.write(out.parent, [info], lambda _: out.name)
+    viewer.write(out.parent, [info], lambda _: out.name, merge=True)
     return out
-
-
-def _tiles_with_data(conn: psycopg.Connection, layer: Layer) -> Iterator[tuple[int, int, int]]:
-    """(z, x, y) of every tile with data: the distinct ancestors at zoom t of the cells at c(t)."""
-    spec, table = layer.spec, sql.Identifier("gridtiles", f"cells_{layer.name}")
-    for t in range(layer.tile_zooms[0], layer.tile_zooms[1] + 1):
-        c = min(max(t + spec.detail, spec.min_zoom), spec.base_zoom)
-        query = sql.SQL(
-            "select xy.x, xy.y from (select distinct qk >> %(shift)s as tile from {} where z = %(c)s) d,"
-            " gridtiles.qk_to_xy(%(t)s, tile) xy"
-        ).format(table)
-        yield from ((t, x, y) for x, y in conn.execute(query, {"shift": 2 * (c - t), "c": c, "t": t}))
 
 
 class _TileFetcher:
     """Fetch batches of tiles from worker threads, one connection per thread."""
 
-    def __init__(self, conn: psycopg.Connection, layer: str) -> None:
+    def __init__(self, conn: psycopg.Connection, layer: str, params: dict[str, str]) -> None:
         self.conninfo = make_conninfo(conn.info.dsn, password=conn.info.password)
         self.layer = layer
+        self.params = params
         self.local = threading.local()
         self.connections: list[psycopg.Connection] = []
 
@@ -106,9 +109,9 @@ class _TileFetcher:
             self.local.conn = psycopg.connect(self.conninfo, autocommit=True)
             self.connections.append(self.local.conn)
         rows = self.local.conn.execute(
-            "select gridtiles.mvt(%s, z, x, y)"
+            "select gridtiles.mvt(%s, z, x, y, %s, cached => false)"
             " from unnest(%s::int[], %s::int[], %s::int[]) with ordinality t(z, x, y, i) order by i",
-            (self.layer, *map(list, zip(*tiles))),
+            (self.layer, Jsonb(self.params), *map(list, zip(*tiles))),
         ).fetchall()
         return [(tile, bytes(row[0])) for tile, row in zip(tiles, rows)]
 

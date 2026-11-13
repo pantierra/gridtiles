@@ -1,5 +1,6 @@
 {
   "name": "pop",
+  "source": {"table": "pop_points"},
   "base_zoom": 16,
   "min_zoom": 2,
   "detail": 4,

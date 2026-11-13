@@ -2,7 +2,7 @@
 
 **A tile-based discrete global grid system, optimized for visualization.**
 
-Turn any point, polygon or raster dataset into a quadkey grid and serve it as zoomable vector tiles. [Why a quadkey grid?](docs/concept.md)
+Serve any PostGIS table of points or polygons as a quadkey grid of zoomable vector tiles, aggregated live on every request. [Why a quadkey grid?](docs/concept.md)
 
 ## Installation
 
@@ -17,8 +17,9 @@ With PostgreSQL + PostGIS running (`make up` starts one on port 5439):
 ```bash
 export GRIDTILES_DB=postgresql://postgres:postgres@localhost:5439/postgres
 gridtiles init
-gridtiles load points.parquet --layer pop --spec spec.json
-gridtiles serve   # open http://localhost:8080
+gridtiles import points.parquet --table pop_points   # or use any table with a geometry column
+gridtiles add pop --spec spec.json                   # spec.json names the source table and values
+gridtiles serve                                      # open http://localhost:8080
 ```
 
 ## Documentation
@@ -27,6 +28,7 @@ gridtiles serve   # open http://localhost:8080
 - [Command line](docs/cli.md)
 - [SQL reference](docs/sql.md)
 - [Python reference](docs/python.md)
+- [Performance](docs/performance.md)
 
 ## Development
 
@@ -47,6 +49,7 @@ make down
 | `make test` | Unit and SQL tests |
 | `make e2e` | End-to-end tests against the running services |
 | `make check` | ruff, mypy and all tests, including end-to-end |
+| `make bench` | Tile latency per zoom on 10 million generated points and 100,000 polygons |
 
 Override the host ports with `GRIDTILES_DB_PORT` and `GRIDTILES_MARTIN_PORT`, and point tests elsewhere with `GRIDTILES_TEST_DSN` and `GRIDTILES_MARTIN_URL`.
 

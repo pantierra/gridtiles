@@ -1,4 +1,4 @@
-"""Layer spec: what to aggregate into a layer's cells and at which zooms.
+"""Layer spec: which source to aggregate into a layer's squares, how, and at which zooms.
 
 `gridtiles.create_layer` in SQL repeats the critical checks, so a spec is safe from either side.
 """
@@ -32,8 +32,19 @@ class ValueSpec(_Model):
         return self
 
 
+class SourceSpec(_Model):
+    """The relation a layer reads: a typed point or polygon `geometry` column, and optionally a
+    date or timestamp column `time` that tile parameters filter on.
+    """
+
+    table: str
+    geometry: str = "geom"
+    time: str | None = None
+
+
 class LayerSpec(_Model):
     name: str = Field(pattern=NAME_PATTERN)
+    source: SourceSpec
     base_zoom: int = Field(ge=0, le=MAX_ZOOM)
     min_zoom: int = Field(ge=0, le=MAX_ZOOM)
     detail: int = Field(default=4, ge=0, le=8)

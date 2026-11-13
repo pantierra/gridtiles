@@ -1,9 +1,9 @@
 # Concept: a global grid built for rendering
 
-gridtiles stores data in a discrete global grid: a hierarchy of cells that covers the world, where every cell has an ID. H3 and S2 work that way too. The difference is what the grid is built for. H3, S2 and most other global grids aim for cells of (nearly) equal area, which serves analysis. gridtiles uses the quadkey grid of web map tiles instead, which serves rendering. It gives up equal area for two properties:
+gridtiles aggregates data into a discrete global grid: a hierarchy of cells that covers the world, where every cell has an ID. H3 and S2 work that way too. The difference is what the grid is built for. H3, S2 and most other global grids aim for cells of (nearly) equal area, which serves analysis. gridtiles uses the quadkey grid of web map tiles instead, which serves rendering. It gives up equal area for two properties:
 
-- **Every tile is one key range.** Reading a tile is a single range scan on the primary key.
-- **Every cell is a ready-made square.** Its geometry follows from its key, so no geometry is stored, and the square drops into a vector tile as is.
+- **Every tile cuts its own cells.** A tile's cells follow from `z/x/y` alone, so the grid is never stored.
+- **Every cell is a ready-made square.** Its geometry follows from its key, and the square drops into a vector tile as is.
 
 ## The grid
 
@@ -12,14 +12,16 @@ A cell is a Web Mercator (EPSG:3857) tile, identified by its zoom `z` and its qu
 This gives three useful properties:
 
 - **Parent and children are bit shifts.** A cell's parent is `qk >> 2`. Its descendants at a finer zoom form one contiguous range, from `qk << 2k` up to, but not including, `(qk + 1) << 2k`.
-- **Containment is exact.** Children tile their parent with no gaps or overlaps. So a rollup (sum, count, min, max, weighted mean) built level by level from the children equals one computed directly from the data, bit for bit.
+- **Containment is exact.** Children tile their parent with no gaps or overlaps, so a point belongs to exactly one cell at every zoom.
 - **Map tiles and cells share one address space.** A map tile `z/x/y` is itself a cell. Its contents at any finer zoom are a single key range.
 
 ## From data to tiles
 
-A layer aggregates its data into cells at a base zoom (for example 16, cells of roughly 600 m at the equator). It then rolls them up to every coarser zoom down to its minimum. A tile at zoom `t` carries the cells `detail` zooms finer, `c(t) = clamp(t + detail, min_zoom, base_zoom)`. With the default `detail = 4`, that's a 16 × 16 grid of squares in every tile, at every zoom.
+A layer is a view over any table with a geometry column; the table stays the single source of truth. A tile at zoom `t` carries the cells `detail` zooms finer, `c(t) = clamp(t + detail, min_zoom, base_zoom)`: with the default `detail = 4`, a 16 × 16 grid of squares in every tile, at every zoom. Past the base zoom (for example 16, cells of roughly 600 m at the equator), a tile shows the single ancestor cell that covers it.
 
-So drawing a tile takes one indexed range read (`z = c and qk >= lo and qk < hi`) plus arithmetic to place each square. No stored geometry is read, simplified or searched spatially. Past the base zoom, a tile shows the single ancestor cell that covers it, cut to the tile. PostGIS encodes the tile with `ST_AsMVT`, and Martin serves it. The same tiles also export to a static PMTiles archive.
+Drawing a tile reads the source rows inside it through a spatial index and aggregates them into its squares on request: a point by arithmetic on its coordinates, a polygon by its covered area in each square. A write to the table shows on the next request, and a time column turns into snapshots and differences by query parameter. PostGIS encodes the tile with `ST_AsMVT`, and Martin serves it. The same tiles also export to a static PMTiles archive.
+
+The price is at low zooms, where one tile aggregates much of the table; see [performance](performance.md).
 
 ## What it gives up
 

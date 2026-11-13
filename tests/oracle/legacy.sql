@@ -1,0 +1,535 @@
+-- Test-only oracle: the materialized load + rollup SQL of commit 12ff764 (src/gridtiles/sql/0*.sql),
+-- with the schema gridtiles renamed to gridtiles_oracle. Live tiles are tested against it.
+
+-- 001_schema.sql
+-- pg_gridtiles: schema and version. Every file in sql/ must be idempotent.
+
+
+create schema if not exists gridtiles_oracle;
+
+create or replace function gridtiles_oracle.version() returns text
+language sql immutable parallel safe
+as $$ select '0.0.0' $$; -- x-release-please-version
+
+create table if not exists gridtiles_oracle.meta (key text primary key, value text not null);
+
+-- 010_quadkey.sql
+-- Quadkeys as integer Morton codes; mirrors src/gridtiles/quadkey.py exactly.
+-- A cell is identified by (z, qk): x in the even bits, y in the odd bits, XYZ tile addressing.
+-- Public qk_* functions validate their input: out of range raises SQLSTATE 22003, a non-digit
+-- quadkey string raises 22P02. Internal _* helpers skip validation.
+-- PostgreSQL gives |, &, <<, >> equal precedence, so bit expressions are fully parenthesised.
+
+create or replace function gridtiles_oracle._check_zoom(z int, lo int default 0, hi int default 30) returns void
+language plpgsql immutable parallel safe as $$
+begin
+    if z not between lo and hi then
+        raise exception 'zoom % outside [%, %]', z, lo, hi using errcode = '22003';
+    end if;
+end $$;
+
+create or replace function gridtiles_oracle._check_cell(z int, qk bigint) returns void
+language plpgsql immutable parallel safe as $$
+begin
+    perform gridtiles_oracle._check_zoom(z);
+    if qk < 0 or qk >= 1::bigint << (2 * z) then
+        raise exception 'quadkey % outside [0, 4^%)', qk, z using errcode = '22003';
+    end if;
+end $$;
+
+-- Interleave zero bits: bit i of v moves to bit 2i.
+create or replace function gridtiles_oracle._spread(v bigint) returns bigint
+language plpgsql immutable strict parallel safe as $$
+begin
+    v := (v | (v << 16)) & 0x0000FFFF0000FFFF;
+    v := (v | (v << 8)) & 0x00FF00FF00FF00FF;
+    v := (v | (v << 4)) & 0x0F0F0F0F0F0F0F0F;
+    v := (v | (v << 2)) & 0x3333333333333333;
+    return (v | (v << 1)) & 0x5555555555555555;
+end $$;
+
+-- Inverse of _spread: keep the even bits, packed.
+create or replace function gridtiles_oracle._compact(v bigint) returns bigint
+language plpgsql immutable strict parallel safe as $$
+begin
+    v := v & 0x5555555555555555;
+    v := (v | (v >> 1)) & 0x3333333333333333;
+    v := (v | (v >> 2)) & 0x0F0F0F0F0F0F0F0F;
+    v := (v | (v >> 4)) & 0x00FF00FF00FF00FF;
+    v := (v | (v >> 8)) & 0x0000FFFF0000FFFF;
+    return (v | (v >> 16)) & 0x00000000FFFFFFFF;
+end $$;
+
+create or replace function gridtiles_oracle._qk(x bigint, y bigint) returns bigint
+language sql immutable strict parallel safe as $$
+    select gridtiles_oracle._spread(x) | (gridtiles_oracle._spread(y) << 1)
+$$;
+
+create or replace function gridtiles_oracle._envelope(z int, qk bigint) returns geometry
+language sql immutable strict parallel safe as $$
+    select ST_TileEnvelope(z, gridtiles_oracle._compact(qk)::int, gridtiles_oracle._compact(qk >> 1)::int)
+$$;
+
+-- EPSG:3857 metres -> cell; points on a boundary go east / south, the edges are clamped.
+create or replace function gridtiles_oracle._from_mercator(mx double precision, my double precision, z int) returns bigint
+language plpgsql immutable strict parallel safe as $$
+declare
+    size constant double precision := 40075016.68557849::double precision / (1::bigint << z);
+    top constant bigint := (1::bigint << z) - 1;
+begin
+    return gridtiles_oracle._qk(
+        least(greatest(floor((mx + 20037508.342789244) / size), 0), top)::bigint,
+        least(greatest(floor((20037508.342789244 - my) / size), 0), top)::bigint
+    );
+end $$;
+
+create or replace function gridtiles_oracle.qk_from_xyz(z int, x int, y int) returns bigint
+language plpgsql immutable strict parallel safe as $$
+begin
+    perform gridtiles_oracle._check_zoom(z);
+    if x < 0 or y < 0 or x >= 1::bigint << z or y >= 1::bigint << z then
+        raise exception 'tile %/% outside [0, 2^%)', x, y, z using errcode = '22003';
+    end if;
+    return gridtiles_oracle._qk(x, y);
+end $$;
+
+create or replace function gridtiles_oracle.qk_to_xy(z int, qk bigint, out x int, out y int)
+language plpgsql immutable strict parallel safe as $$
+begin
+    perform gridtiles_oracle._check_cell(z, qk);
+    x := gridtiles_oracle._compact(qk);
+    y := gridtiles_oracle._compact(qk >> 1);
+end $$;
+
+-- Bing quadkey string: exactly z base-4 digits, most significant first.
+create or replace function gridtiles_oracle.qk_to_text(z int, qk bigint) returns text
+language plpgsql immutable strict parallel safe as $$
+begin
+    perform gridtiles_oracle._check_cell(z, qk);
+    return coalesce(string_agg(((qk >> (2 * i)) & 3)::text, '' order by i desc), '')
+        from generate_series(0, z - 1) i;
+end $$;
+
+-- Parse a quadkey string; its zoom is its length.
+create or replace function gridtiles_oracle.qk_from_text(t text) returns bigint
+language plpgsql immutable strict parallel safe as $$
+begin
+    perform gridtiles_oracle._check_zoom(length(t));
+    if t !~ '^[0-3]*$' then
+        raise exception 'quadkey % has a digit outside 0-3', quote_literal(t) using errcode = '22P02';
+    end if;
+    return coalesce(sum(substr(t, i, 1)::bigint << (2 * (length(t) - i))), 0)
+        from generate_series(1, length(t)) i;
+end $$;
+
+create or replace function gridtiles_oracle.qk_parent(z int, qk bigint, z_to int) returns bigint
+language plpgsql immutable strict parallel safe as $$
+begin
+    perform gridtiles_oracle._check_cell(z, qk);
+    perform gridtiles_oracle._check_zoom(z_to, 0, z);
+    return qk >> (2 * (z - z_to));
+end $$;
+
+-- Half-open range of descendant quadkeys at zoom z_to.
+create or replace function gridtiles_oracle.qk_child_range(z int, qk bigint, z_to int) returns int8range
+language plpgsql immutable strict parallel safe as $$
+begin
+    perform gridtiles_oracle._check_cell(z, qk);
+    perform gridtiles_oracle._check_zoom(z_to, z);
+    return int8range(qk << (2 * (z_to - z)), (qk + 1) << (2 * (z_to - z)));
+end $$;
+
+create or replace function gridtiles_oracle.qk_envelope(z int, qk bigint) returns geometry(Polygon, 3857)
+language plpgsql immutable strict parallel safe as $$
+begin
+    perform gridtiles_oracle._check_cell(z, qk);
+    return gridtiles_oracle._envelope(z, qk);
+end $$;
+
+-- Cell containing a point of any SRID; empty -> NULL. Latitude is clamped to the Web Mercator
+-- limit and projected with the same spherical formula as quadkey.from_lonlat.
+create or replace function gridtiles_oracle.qk_from_point(geom geometry, z int) returns bigint
+language plpgsql immutable strict parallel safe as $$
+declare
+    lat double precision;
+begin
+    perform gridtiles_oracle._check_zoom(z);
+    if ST_IsEmpty(geom) then
+        return null;
+    elsif ST_SRID(geom) = 3857 then
+        return gridtiles_oracle._from_mercator(ST_X(geom), ST_Y(geom), z);
+    elsif ST_SRID(geom) <> 4326 then
+        geom := ST_Transform(geom, 4326);
+    end if;
+    lat := radians(greatest(-85.0511287798, least(85.0511287798, ST_Y(geom))));
+    return gridtiles_oracle._from_mercator(
+        ST_X(geom) * 20037508.342789244 / 180,
+        ln(tan(pi() / 4 + lat / 2)) * 20037508.342789244 / pi(),
+        z
+    );
+end $$;
+
+-- 020_layers.sql
+-- Layer registry and per-layer cell tables. Spec checks mirror src/gridtiles/spec.py;
+-- an invalid spec raises SQLSTATE 22023.
+
+create table if not exists gridtiles_oracle.layers (
+    name text primary key check (name ~ '^[a-z][a-z0-9_]{0,47}$'),
+    spec jsonb not null,
+    zb smallint not null,
+    zmin smallint not null,
+    detail smallint not null,
+    stats jsonb,
+    cells bigint,  -- rows over all zooms, set by rollup
+    bounds double precision[],  -- [west, south, east, north] in WGS84 of the cells at zb, set by rollup
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now()
+);
+
+-- Stored columns per value, in table order: the single source for every function that writes or
+-- reads cell values. `i` is the column position; `part` is 'value' or 'weight' (the mean's weight
+-- sidecar); `merge` is the aggregate that combines partial results of the column (see _merge).
+create or replace function gridtiles_oracle._columns(spec jsonb)
+returns table (value text, agg text, col text, merge text, part text, src text, weight text, i bigint)
+language sql immutable strict parallel safe as $$
+    select v->>'name', v->>'agg', v->>'name' || c.suffix, c.merge, c.part, v->>'from', v->>'weight',
+        row_number() over (order by e.i, c.pos)
+    from jsonb_array_elements(spec->'values') with ordinality as e(v, i)
+    join (values
+        ('sum', '_sum', 'sum', 'value', 1), ('min', '_min', 'min', 'value', 1), ('max', '_max', 'max', 'value', 1),
+        ('mean', '_sum', 'sum', 'value', 1), ('mean', '_w', 'sum', 'weight', 2)
+    ) as c(agg, suffix, merge, part, pos) on c.agg = v->>'agg'
+    order by e.i, c.pos
+$$;
+
+-- SQL expression merging two partial aggregates a and b (NULL means "no data").
+create or replace function gridtiles_oracle._merge(merge text, a text, b text) returns text
+language sql immutable strict parallel safe as $$
+    select case merge
+        when 'sum' then format('coalesce(%1$s + %2$s, %1$s, %2$s)', a, b)
+        when 'min' then format('least(%s, %s)', a, b)
+        when 'max' then format('greatest(%s, %s)', a, b)
+    end
+$$;
+
+-- Comma-led list of a layer's value columns, e.g. ", population_sum, completeness_w".
+create or replace function gridtiles_oracle._column_list(spec jsonb) returns text
+language sql immutable strict parallel safe as $$
+    select coalesce(string_agg(', ' || quote_ident(col), '' order by i), '')
+    from gridtiles_oracle._columns(spec) c
+$$;
+
+-- Comma-led aggregates turning source records into value columns. A record adds `share` (an SQL
+-- expression: 1 for points, the covered fraction for polygons) of its value to sums, and weighs
+-- its value by `area` (1 for points, the covered area for polygons) in means. min/max ignore both.
+create or replace function gridtiles_oracle._aggregates(spec jsonb, share text default '1', area text default '1') returns text
+language sql immutable strict parallel safe as $$
+    select coalesce(string_agg(', ' || case
+        when c.part = 'weight' then format('sum(case when %I is not null then %s * %s end)', c.src, w, area)
+        when c.agg = 'mean' then format('sum(%I * %s * %s)', c.src, w, area)
+        when c.agg = 'sum' then format('sum(%I * %s)', c.src, share)
+        else format('%s(%I)', c.merge, c.src)
+    end, '' order by c.i), '')
+    from gridtiles_oracle._columns(spec) c,
+        lateral (select coalesce(quote_ident(c.weight), '1')) x(w)
+$$;
+
+-- Comma-led "col = merge(a.col, b.col)" assignments, e.g. for ON CONFLICT DO UPDATE.
+create or replace function gridtiles_oracle._merge_set(spec jsonb, a text, b text) returns text
+language sql immutable strict parallel safe as $$
+    select coalesce(string_agg(format(', %I = %s', col,
+        gridtiles_oracle._merge(merge, a || '.' || quote_ident(col), b || '.' || quote_ident(col))), '' order by i), '')
+    from gridtiles_oracle._columns(spec) c
+$$;
+
+-- Comma-led aggregates combining child cells into their parent (one merge per stored column).
+-- Sums run in quadkey order so float results are reproducible bit for bit.
+create or replace function gridtiles_oracle._merge_aggregates(spec jsonb) returns text
+language sql immutable strict parallel safe as $$
+    select coalesce(string_agg(format(', %s(%I%s)', merge, col, case merge when 'sum' then ' order by qk' else '' end),
+        '' order by i), '')
+    from gridtiles_oracle._columns(spec) c
+$$;
+
+-- The tile property of each value as an SQL expression over a cell row.
+create or replace function gridtiles_oracle._properties(spec jsonb) returns table (value text, agg text, expr text)
+language sql immutable strict parallel safe as $$
+    select v->>'name', v->>'agg', case v->>'agg'
+        when 'count' then 'n'
+        when 'mean' then format('%I / nullif(%I, 0)', v->>'name' || '_sum', v->>'name' || '_w')
+        else quote_ident(v->>'name' || '_' || (v->>'agg'))
+    end
+    from jsonb_array_elements(spec->'values') with ordinality as e(v, i)
+    order by e.i
+$$;
+
+create or replace function gridtiles_oracle._check_spec(spec jsonb) returns void
+language plpgsql immutable parallel safe as $$
+declare
+    k text;
+    v jsonb;
+begin
+    if coalesce(spec->>'name', '') !~ '^[a-z][a-z0-9_]{0,47}$' then
+        raise exception 'layer name % must match ^[a-z][a-z0-9_]{0,47}$', spec->'name' using errcode = '22023';
+    end if;
+    -- Checked before any ::int cast, which would raise 22P02 instead of 22023; detail is optional.
+    foreach k in array array['base_zoom', 'min_zoom', 'detail'] loop
+        if (k <> 'detail' or spec->>k is not null) and coalesce(spec->>k, '') !~ '^\d{1,2}$' then
+            raise exception '% must be a non-negative integer, got %', k, spec->k using errcode = '22023';
+        end if;
+    end loop;
+    if not coalesce((spec->>'min_zoom')::int between 0 and (spec->>'base_zoom')::int and (spec->>'base_zoom')::int <= 30, false) then
+        raise exception 'need 0 <= min_zoom <= base_zoom <= 30, got % and %', spec->'min_zoom', spec->'base_zoom'
+            using errcode = '22023';
+    end if;
+    if coalesce((spec->>'detail')::int, 4) not between 0 and 8 then
+        raise exception 'detail % outside [0, 8]', spec->'detail' using errcode = '22023';
+    end if;
+    if jsonb_typeof(spec->'values') is distinct from 'array' then
+        raise exception 'values must be an array' using errcode = '22023';
+    end if;
+    for v in select jsonb_array_elements(spec->'values') loop
+        if coalesce(v->>'name', '') !~ '^[a-z][a-z0-9_]{0,47}$' then
+            raise exception 'value name % must match ^[a-z][a-z0-9_]{0,47}$', v->'name' using errcode = '22023';
+        elsif jsonb_typeof(v->'from') is distinct from 'string' then
+            raise exception 'value %: from must be a column name', v->'name' using errcode = '22023';
+        elsif coalesce(v->>'agg', '') not in ('count', 'sum', 'min', 'max', 'mean') then
+            raise exception 'value %: agg % not one of count, sum, min, max, mean', v->'name', v->'agg'
+                using errcode = '22023';
+        elsif v->>'weight' is not null and v->>'agg' <> 'mean' then
+            raise exception 'value %: weight is only allowed with agg mean', v->'name' using errcode = '22023';
+        end if;
+    end loop;
+    if (select count(distinct x->>'name') <> count(*) from jsonb_array_elements(spec->'values') x) then
+        raise exception 'duplicate value names' using errcode = '22023';
+    end if;
+end $$;
+
+create or replace function gridtiles_oracle.create_layer(spec jsonb) returns void
+language plpgsql as $$
+declare
+    name text := spec->>'name';
+begin
+    perform gridtiles_oracle._check_spec(spec);
+    insert into gridtiles_oracle.layers (name, spec, zb, zmin, detail)
+    values (name, spec, (spec->>'base_zoom')::int, (spec->>'min_zoom')::int, coalesce((spec->>'detail')::int, 4));
+    execute format(
+        'create table gridtiles_oracle.%I (z smallint, qk bigint, n bigint not null%s, primary key (z, qk))',
+        'cells_' || name,
+        (select coalesce(string_agg(format(', %I double precision', col), '' order by i), '')
+         from gridtiles_oracle._columns(spec) c)
+    );
+    -- Tile server entry point (Martin function source); gridtiles_oracle.mvt is defined in 040_mvt.sql.
+    execute format(
+        'create function gridtiles_oracle.%I(z integer, x integer, y integer) returns bytea
+         language sql stable parallel safe as $f$ select gridtiles_oracle.mvt(%L, z, x, y) $f$',
+        'tile_' || name, name
+    );
+end $$;
+
+create or replace function gridtiles_oracle.drop_layer(name text) returns void
+language plpgsql as $$
+begin
+    delete from gridtiles_oracle.layers l where l.name = drop_layer.name;
+    if not found then
+        raise exception 'layer % does not exist', name using errcode = '42704';
+    end if;
+    execute format('drop table gridtiles_oracle.%I', 'cells_' || name);
+    execute format('drop function gridtiles_oracle.%I(integer, integer, integer)', 'tile_' || name);
+end $$;
+
+-- 025_ingest.sql
+-- Ingest: aggregate a staging table into a layer's base cells (z = zb). The staging table has a
+-- `geom` column plus one double precision column per value source and weight. Repeated loads add
+-- up: existing cells are merged per aggregator. Rows are written in quadkey order, so concurrent
+-- loads into one layer lock cells in the same order and avoid deadlocks.
+
+-- Insert aggregated base cells from `source`, a query with a `_cell` quadkey column, merging
+-- with existing cells.
+create or replace function gridtiles_oracle._insert_cells(l gridtiles_oracle.layers, source text, aggregates text) returns bigint
+language plpgsql as $$
+declare
+    written bigint;
+begin
+    execute format(
+        'insert into gridtiles_oracle.%I as t (z, qk, n%s) select %s, _cell, count(*)%s from (%s) s group by _cell order by _cell
+         on conflict (z, qk) do update set n = t.n + excluded.n%s',
+        'cells_' || l.name, gridtiles_oracle._column_list(l.spec), l.zb, aggregates, source,
+        gridtiles_oracle._merge_set(l.spec, 't', 'excluded')
+    );
+    get diagnostics written = row_count;
+    return written;
+end $$;
+
+create or replace function gridtiles_oracle.ingest_points(name text, staging regclass) returns bigint
+language plpgsql as $$
+declare
+    l gridtiles_oracle.layers;
+begin
+    select * into strict l from gridtiles_oracle.layers where layers.name = ingest_points.name;
+    return gridtiles_oracle._insert_cells(l,
+        format('select gridtiles_oracle.qk_from_point(geom, %s) as _cell, * from %s where geom is not null and not ST_IsEmpty(geom)', l.zb, staging),
+        gridtiles_oracle._aggregates(l.spec));
+end $$;
+
+-- Tile index range at zoom z covered by the bounding box of an EPSG:3857 geometry.
+create or replace function gridtiles_oracle._bbox_tile_range(g geometry, z int, out x0 int, out x1 int, out y0 int, out y1 int)
+language sql immutable strict parallel safe as $$
+    select greatest(floor((ST_XMin(g) + 20037508.342789244) / size)::int, 0),
+           least(floor((ST_XMax(g) + 20037508.342789244) / size)::int, top),
+           greatest(floor((20037508.342789244 - ST_YMax(g)) / size)::int, 0),
+           least(floor((20037508.342789244 - ST_YMin(g)) / size)::int, top)
+    from (select 40075016.68557849::double precision / (1::bigint << z) as size, (1 << z) - 1 as top) k
+$$;
+
+-- Polygons are split over the base cells they overlap: sums get value x covered fraction, means
+-- weigh by covered area, min/max apply to every touched cell, and n counts touching polygons.
+-- A polygon whose bounding box spans more than max_cells base cells raises SQLSTATE 54000
+-- (NULL: no limit).
+-- A polygon in EPSG:3857, ready to split: ST_MakeValid repairs self-intersections (which
+-- ST_Intersection would reject), keeping the polygonal part; WGS84 input is clipped to the Mercator
+-- latitudes before projecting, since the poles have no Mercator coordinates; the result is clipped
+-- to the Web Mercator square, so a polygon's whole value lands on cells that exist.
+create or replace function gridtiles_oracle._mercator_polygon(geom geometry) returns geometry
+language sql immutable strict parallel safe as $$
+    select ST_Intersection(
+        ST_Transform(case when ST_SRID(valid) = 4326
+                          then ST_Intersection(valid, ST_MakeEnvelope(-180, -85.06, 180, 85.06, 4326))
+                          else valid end, 3857),
+        ST_MakeEnvelope(-20037508.342789244, -20037508.342789244, 20037508.342789244, 20037508.342789244, 3857))
+    from (select ST_CollectionExtract(ST_MakeValid(geom), 3) as valid) v
+$$;
+
+create or replace function gridtiles_oracle.ingest_polygons(name text, staging regclass, max_cells bigint default 1000000)
+returns bigint
+language plpgsql as $$
+declare
+    l gridtiles_oracle.layers;
+    widest bigint;
+    written bigint;
+begin
+    select * into strict l from gridtiles_oracle.layers where layers.name = ingest_polygons.name;
+    -- Projected once: both the cell limit check and the split read it.
+    drop table if exists _gridtiles_polygons;
+    execute format(
+        'create temp table _gridtiles_polygons as
+         select *, gridtiles_oracle._mercator_polygon(geom) as _g from %s where not coalesce(ST_IsEmpty(geom), true)',
+        staging);
+    if max_cells is not null then
+        execute format(
+            'select max((r.x1 - r.x0 + 1)::bigint * (r.y1 - r.y0 + 1))
+             from _gridtiles_polygons p, gridtiles_oracle._bbox_tile_range(p._g, %s) r', l.zb
+        ) into widest;
+        if widest > max_cells then
+            raise exception 'a polygon spans % cells at z%, above max_cells_per_feature %', widest, l.zb, max_cells
+                using errcode = '54000';
+        end if;
+    end if;
+    written := gridtiles_oracle._insert_cells(l,
+        format(
+            'select p.*, gridtiles_oracle._qk(t.x, u.y) as _cell, a._a / ST_Area(p._g) as _share, a._a as _area
+             from _gridtiles_polygons p, gridtiles_oracle._bbox_tile_range(p._g, %s) r,
+                 generate_series(r.x0, r.x1) t(x), generate_series(r.y0, r.y1) u(y),
+                 lateral (select ST_Area(ST_Intersection(p._g, ST_TileEnvelope(%s, t.x, u.y))) as _a) a
+             where a._a > 0',
+            l.zb, l.zb),
+        gridtiles_oracle._aggregates(l.spec, '_share', '_area'));
+    drop table _gridtiles_polygons;
+    return written;
+end $$;
+
+-- 030_rollup.sql
+-- Rollup: rebuild levels zb - 1 down to zmin from their children, then refresh the layer stats
+-- and bounds.
+
+create or replace function gridtiles_oracle.rollup(name text) returns void
+language plpgsql as $$
+declare
+    l gridtiles_oracle.layers;
+    cells text;
+    p record;
+    layer_stats jsonb := '{}';
+    box double precision[];
+    total bigint;
+    s jsonb;
+begin
+    select * into strict l from gridtiles_oracle.layers where layers.name = rollup.name;
+    cells := format('gridtiles_oracle.%I', 'cells_' || l.name);
+    execute format('delete from %s where z < %s', cells, l.zb);
+    for z in reverse l.zb - 1..l.zmin loop
+        execute format(
+            'insert into %1$s (z, qk, n%2$s) select %3$s, qk >> 2, sum(n)%4$s from %1$s where z = %5$s group by qk >> 2',
+            cells, gridtiles_oracle._column_list(l.spec), z, gridtiles_oracle._merge_aggregates(l.spec), z + 1
+        );
+    end loop;
+
+    -- Per value at zb: total (count and sum only; a sum of means or extremes means nothing), min, max
+    -- and 7 quantile breakpoints of the tile property.
+    for p in select * from gridtiles_oracle._properties(l.spec) loop
+        execute format(
+            'select jsonb_build_object(''total'', %s, ''min'', min(v), ''max'', max(v), ''breaks'',
+                percentile_cont(array[0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875]) within group (order by v))
+             from (select %s as v from %s where z = %s) c',
+            case when p.agg in ('count', 'sum') then 'sum(v)' else 'null' end, p.expr, cells, l.zb
+        ) into s;
+        layer_stats := layer_stats || jsonb_build_object(p.value, s);
+    end loop;
+    -- Bounds from the extreme tile indices at zb: two corner envelopes instead of one per cell.
+    execute format(
+        'select array[ST_XMin(nw), ST_YMin(se), ST_XMax(se), ST_YMax(nw)]
+         from (select min(x) x0, min(y) y0, max(x) x1, max(y) y1
+               from (select gridtiles_oracle._compact(qk) x, gridtiles_oracle._compact(qk >> 1) y from %1$s where z = %2$s) c) b,
+         lateral (select ST_Transform(ST_TileEnvelope(%2$s, x0::int, y0::int), 4326) nw,
+                         ST_Transform(ST_TileEnvelope(%2$s, x1::int, y1::int), 4326) se) e',
+        cells, l.zb
+    ) into box;
+    execute format('select count(*) from %s', cells) into total;
+    update gridtiles_oracle.layers set stats = layer_stats, cells = total, bounds = box, updated_at = now()
+    where layers.name = l.name;
+end $$;
+
+-- 040_mvt.sql
+-- MVT encoder: a tile at zoom t carries the cells at c(t) = clamp(t + detail, zmin, zb).
+-- For c >= t that is one contiguous key range of descendants; for c < t (overzoom) the single
+-- ancestor cell. One layer named `cells`, extent 4096, buffer 0.
+
+-- The tile query as SQL text (exposed for EXPLAIN in tests).
+create or replace function gridtiles_oracle._mvt_query(name text, z int, x int, y int) returns text
+language plpgsql stable parallel safe as $$
+declare
+    l gridtiles_oracle.layers;
+    tile bigint := gridtiles_oracle.qk_from_xyz(z, x, y);
+    c int;
+    lo bigint;
+    hi bigint;
+begin
+    select * into strict l from gridtiles_oracle.layers where layers.name = _mvt_query.name;
+    c := least(greatest(z + l.detail, l.zmin), l.zb);
+    if c >= z then
+        lo := tile << (2 * (c - z));
+        hi := (tile + 1) << (2 * (c - z));
+    else
+        lo := tile >> (2 * (z - c));
+        hi := lo + 1;
+    end if;
+    return format(
+        'select ST_AsMVT(f, ''cells'', 4096, ''geom'') from (
+            select gridtiles_oracle.qk_to_text(z, qk) as qk, z, n%s,
+                ST_AsMVTGeom(gridtiles_oracle._envelope(z, qk), ST_TileEnvelope(%s, %s, %s), 4096, 0) as geom
+            from gridtiles_oracle.%I where z = %s and qk >= %s and qk < %s
+        ) f',
+        (select coalesce(string_agg(format(', %s as %I', p.expr, p.value), '' order by p.i), '')
+         from gridtiles_oracle._properties(l.spec) with ordinality p(value, agg, expr, i) where p.agg <> 'count'),
+        z, x, y, 'cells_' || l.name, c, lo, hi
+    );
+end $$;
+
+-- Vector tile for one layer; an empty tile is a zero-length bytea.
+create or replace function gridtiles_oracle.mvt(name text, z int, x int, y int) returns bytea
+language plpgsql stable parallel safe as $$
+declare
+    result bytea;
+begin
+    execute gridtiles_oracle._mvt_query(name, z, x, y) into result;
+    return coalesce(result, ''::bytea);
+end $$;

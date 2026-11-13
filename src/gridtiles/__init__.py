@@ -1,4 +1,4 @@
-"""Turn point, polygon and raster data into a quadkey grid served as zoomable vector tiles."""
+"""Serve PostGIS points and polygons as a quadkey grid of vector tiles, aggregated live."""
 
 from importlib.metadata import version
 

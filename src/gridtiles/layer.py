@@ -1,6 +1,6 @@
-"""A registered layer as consumers (tile server, viewer, exporters) see it; storage-independent."""
+"""A registered layer as consumers (tile server, viewer, exporters) see it."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from gridtiles.spec import LayerSpec
@@ -9,9 +9,10 @@ from gridtiles.spec import LayerSpec
 @dataclass(frozen=True)
 class Layer:
     spec: LayerSpec
-    stats: dict[str, Any] | None  # per value: total, min, max, breaks (set by rollup)
-    cells: int | None  # rows over all zooms (set by rollup)
-    bounds: tuple[float, float, float, float] | None  # WGS84 [west, south, east, north] of the base cells
+    stats: dict[str, Any] | None = None  # per value: total, min, max, breaks (from gridtiles.stats)
+    bounds: tuple[float, float, float, float] | None = None  # WGS84 [west, south, east, north] of the base squares
+    times: tuple[str, ...] | None = None  # distinct values of the source's time column, ascending
+    params: dict[str, str] = field(default_factory=dict)  # tile parameters the stats describe: the latest time
 
     @property
     def name(self) -> str:
