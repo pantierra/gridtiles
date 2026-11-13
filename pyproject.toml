@@ -1,20 +1,18 @@
 [project]
 name = "gridtiles"
 version = "0.0.0"
-description = "Turn point, polygon and raster data into a quadkey grid served as zoomable vector tiles"
+description = "Serve PostGIS points and polygons as a quadkey grid of vector tiles, aggregated live"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Development Seed" }]
 requires-python = ">=3.12"
 dependencies = [
-    "numpy>=2.5.4",
     "pmtiles>=3.8.1",
     "psycopg[binary]>=3.2",
     "pyarrow>=26.0.0",
     "pydantic>=2.14.2",
     "pyogrio>=0.13.0",
-    "rasterio>=1.5.2",
     "typer>=0.27.3",
 ]
 
@@ -31,7 +29,6 @@ dev = [
     "pre-commit",
     "pytest>=8",
     "ruff",
-    "shapely>=2.2.0",
 ]
 
 [build-system]
@@ -49,7 +46,7 @@ strict = true
 files = ["src"]
 
 [[tool.mypy.overrides]]
-module = ["pyarrow.*", "pyogrio.*", "rasterio.*"]
+module = ["pyarrow.*", "pyogrio.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

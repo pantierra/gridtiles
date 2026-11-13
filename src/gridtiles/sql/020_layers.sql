@@ -14,17 +14,8 @@ create table if not exists gridtiles.layers (
     zb smallint not null,
     zmin smallint not null,
     detail smallint not null,
-    created_at timestamptz not null default now()
-);
-
--- Cached results of gridtiles.stats, which aggregates a whole source: a cache that may lag the
--- source, labelled with when it was computed. Tiles never read it.
-create table if not exists gridtiles.stats_cache (
-    layer text not null references gridtiles.layers (name) on delete cascade,
-    params jsonb not null,
-    stats jsonb not null,
-    computed_at timestamptz not null,
-    primary key (layer, params)
+    cache_zoom smallint,  -- tiles at levels up to this read gridtiles.cache_<name> (refresh_cache)
+    cached_at timestamptz
 );
 
 create or replace function gridtiles._check_spec(spec jsonb) returns void
@@ -166,4 +157,5 @@ begin
         raise exception 'layer % does not exist', name using errcode = '42704';
     end if;
     execute format('drop function gridtiles.%I(integer, integer, integer, json)', 'tile_' || name);
+    execute format('drop table if exists gridtiles.%I', 'cache_' || name);
 end $$;

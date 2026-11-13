@@ -27,7 +27,7 @@ def run(*args: str | Path):
 def test_help_lists_commands() -> None:
     result = run("--help")
     assert result.exit_code == 0
-    for command in ("init", "import", "add", "drop", "layers", "stats", "serve", "export"):
+    for command in ("init", "import", "add", "drop", "layers", "cache", "serve", "export"):
         assert command in result.output
     assert "load" not in result.output
 
@@ -42,10 +42,7 @@ def test_import_report(url: str) -> None:
     assert "ImportReport(records_read=8, records_imported=8" in result.output
     again = run("import", FIXTURES / "points_small.csv", "--table", "small", "--db", url)
     assert again.exit_code == 2 and "exists" in again.output
-    assert run("import", FIXTURES / "points_small.csv", "--table", "small", "--append", "--db", url).exit_code == 0
     assert run("import", FIXTURES / "points_small.csv", "--table", "small", "--replace", "--db", url).exit_code == 0
-    both = run("import", FIXTURES / "points_small.csv", "--table", "small", "--replace", "--append", "--db", url)
-    assert both.exit_code == 2
 
 
 def test_add_list_drop(url: str) -> None:
@@ -59,16 +56,6 @@ def test_add_list_drop(url: str) -> None:
     assert run("drop", "pop", "--db", url).exit_code == 2
     with psycopg.connect(url) as conn:
         assert conn.execute("select count(*) from pop_points").fetchone() == (9800,)
-
-
-def test_add_with_source_flags(url: str, tmp_path: Path) -> None:
-    with psycopg.connect(url) as conn:
-        conn.execute("create table if not exists renamed as select geom as shape, pop from pop_points")
-        conn.execute("create index if not exists renamed_shape on renamed using gist (shape)")
-    spec = tmp_path / "spec.json"
-    spec.write_text(json.dumps({"base_zoom": 14, "min_zoom": 4, "values": [{"name": "p", "from": "pop", "agg": "sum"}]}))
-    result = run("add", "flags", "--source", "renamed", "--geometry", "shape", "--spec", spec, "--db", url)
-    assert result.exit_code == 0, result.output
 
 
 def test_add_from_toml(url: str, tmp_path: Path) -> None:
@@ -101,23 +88,23 @@ def test_unreadable_spec_exits_2(url: str, tmp_path: Path, content: str | None) 
     assert "Cannot read layer spec" in result.output
 
 
-def test_stats_and_export(url: str, tmp_path: Path) -> None:
-    assert run("add", "stats", "--spec", FIXTURES / "spec_pop.json", "--db", url).exit_code == 0
-    result = run("stats", "stats", "--refresh", "--db", url)
+def test_cache_and_export(url: str, tmp_path: Path) -> None:
+    assert run("add", "cached", "--spec", FIXTURES / "spec_pop.json", "--db", url).exit_code == 0
+    result = run("cache", "cached", "--max-zoom", "6", "--db", url)
+    assert result.exit_code == 0 and result.output.startswith("Cached ")
+    assert run("cache", "cached", "--drop", "--db", url).output == "Dropped the cache of cached\n"
+    assert run("cache", "cached", "--db", url).exit_code == 2
+    assert run("cache", "missing", "--drop", "--db", url).exit_code == 2
+    result = run("export", "--layer", "cached", "-o", tmp_path / "cached.pmtiles", "--db", url)
     assert result.exit_code == 0, result.output
-    out = json.loads(result.output)
-    assert out["params"] == {} and out["computed_at"]
-    with psycopg.connect(url) as conn:
-        assert conn.execute("select sum(pop) from pop_points").fetchone() == (out["stats"]["population"]["total"],)
-    assert run("stats", "missing", "--db", url).exit_code == 2
-    assert run("stats", "stats", "--at", "2024-01-01", "--db", url).exit_code == 2  # no time column
-    result = run("export", "--layer", "stats", "-o", tmp_path / "stats.pmtiles", "--db", url)
-    assert result.exit_code == 0, result.output
-    assert (tmp_path / "stats.pmtiles").exists()
+    assert (tmp_path / "cached.pmtiles").exists()
+    assert run("export", "--layer", "cached", "-o", tmp_path / "x.pmtiles", "--at", "2024-01-01", "--db", url).exit_code == 2
 
 
-def test_bad_source_exits_2(url: str) -> None:
-    result = run("add", "nosource", "--source", "missing", "--spec", FIXTURES / "spec_pop.json", "--db", url)
+def test_bad_source_exits_2(url: str, tmp_path: Path) -> None:
+    spec = tmp_path / "spec.json"
+    spec.write_text(json.dumps({**json.loads((FIXTURES / "spec_pop.json").read_text()), "source": {"table": "missing"}}))
+    result = run("add", "nosource", "--spec", spec, "--db", url)
     assert result.exit_code == 2
     assert 'source table "missing" does not exist' in result.output
 
@@ -128,7 +115,7 @@ def test_unsupported_geometry_exits_2(url: str, tmp_path: Path) -> None:
     path.write_text(json.dumps({"type": "FeatureCollection", "features": [line]}))
     result = run("import", path, "--table", "lines", "--db", url)
     assert result.exit_code == 2
-    assert "only points and polygons" in result.output
+    assert "only points or only polygons are supported, got ST_LineString" in result.output
 
 
 def test_missing_database_exits_2(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

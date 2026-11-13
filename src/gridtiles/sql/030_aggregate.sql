@@ -86,7 +86,6 @@ declare
     col text := quote_ident(l.time_column);
     typ text := l.time_type::text;
 begin
-    filter := 'true';
     if jsonb_typeof(params) is distinct from 'object' then
         raise exception 'tile parameters must be a JSON object, got %', params using errcode = '22023';
     end if;
@@ -105,17 +104,11 @@ begin
     elsif params ? 'diff' and not params ? 'at' then
         raise exception 'parameter diff needs at' using errcode = '22023';
     end if;
-    if params ? 'diff' then
-        side_b := format('%s = %L::%s', col, params->>'at', typ);
-        side_a := format('%s = %L::%s', col, params->>'diff', typ);
-        filter := format('(%s or %s)', side_b, side_a);
-    elsif params ? 'at' then
-        filter := format('%s = %L::%s', col, params->>'at', typ);
-    elsif params ? 'start' or params ? 'end' then
-        filter := concat_ws(' and ',
-            case when params ? 'start' then format('%s >= %L::%s', col, params->>'start', typ) end,
-            case when params ? 'end' then format('%s < %L::%s', col, params->>'end', typ) end);
-    end if;
+    side_b := case when params ? 'at' then format('%s = %L::%s', col, params->>'at', typ) end;
+    side_a := case when params ? 'diff' then format('%s = %L::%s', col, params->>'diff', typ) end;
+    filter := coalesce('(' || side_b || ' or ' || side_a || ')', side_b, nullif(concat_ws(' and ',
+        case when params ? 'start' then format('%s >= %L::%s', col, params->>'start', typ) end,
+        case when params ? 'end' then format('%s < %L::%s', col, params->>'end', typ) end), ''), 'true');
 end $$;
 
 -- The source rows of a region: `_g`, the geometry ready to aggregate (a point in EPSG:3857 or
@@ -131,7 +124,7 @@ language sql stable parallel safe as $$
              else format('ST_Transform(%I, 4326)', l.geometry) end,
         coalesce((select string_agg(format(', %I::double precision as %s', s.col, s.alias), '' order by s.alias)
                   from gridtiles._sources(l.spec) s), ''),
-        case when side_b is not null then format(', %s as _in_b, %s as _in_a', side_b, side_a) else '' end,
+        case when side_a is not null then format(', %s as _in_b, %s as _in_a', side_b, side_a) else '' end,
         l.source, region, "time", l.geometry)
 $$;
 
@@ -159,38 +152,23 @@ language sql immutable strict parallel safe as $$
     from (select 40075016.68557849::double precision / (1::bigint << z) as size, (1 << z) - 1 as top) k
 $$;
 
--- A sum over the rows of a square (those matching `cond`, if given). Float sums depend on their
--- order; `gridtiles.sum_mode` picks how they are made reproducible: 'ordered' (default) sums the
--- terms in ascending order, 'numeric' sums them exactly as numeric (order-independent, so
--- parallel aggregation applies; each term is rounded to 15 significant digits), 'plain' leaves
--- the order to the executor.
-create or replace function gridtiles._sum_sql(term text, cond text default null) returns text
-language sql stable parallel safe as $$
-    select case coalesce(nullif(current_setting('gridtiles.sum_mode', true), ''), 'ordered')
-        when 'numeric' then format('(sum((%s)::numeric)%s)::double precision', term, f)
-        when 'plain' then format('sum(%s)%s', term, f)
-        else format('sum(%1$s order by %1$s)%2$s', term, f)
-    end
-    from (select case when cond is not null then format(' filter (where %s)', cond) else '' end) x(f)
-$$;
-
 -- Each non-count value as an aggregate over the rows of a square (those matching `cond`, if
 -- given): sums add the value times `share` (1 for a point), means weigh it by its weight times
--- `area` (1 for a point); min/max ignore both. Count values are
--- the property `n`.
+-- `area` (1 for a point), min/max ignore both. Sums add their terms in ascending order, so the
+-- result does not depend on the order rows are read in. Count values are the property `n`.
 create or replace function gridtiles._value_exprs(spec jsonb, share text, area text, cond text default null)
 returns table (name text, agg text, expr text, i bigint)
-language sql stable parallel safe as $$
+language sql immutable parallel safe as $$
     select v->>'name', v->>'agg', case v->>'agg'
-        when 'sum' then gridtiles._sum_sql(format('%s * %s', s.alias, share), cond)
-        when 'mean' then format('%s / nullif(%s, 0)',
-            gridtiles._sum_sql(format('%s * %s * %s', s.alias, w, area), cond),
-            gridtiles._sum_sql(format('case when %s is not null then %s * %s end', s.alias, w, area), cond))
-        else format('%s(%s)%s', v->>'agg', s.alias, case when cond is not null then format(' filter (where %s)', cond) else '' end)
+        when 'sum' then format('sum(%1$s * %2$s order by %1$s * %2$s)%3$s', s.alias, share, f)
+        when 'mean' then format('sum(%1$s order by %1$s)%3$s / nullif(sum(%2$s order by %2$s)%3$s, 0)',
+            format('%s * %s * %s', s.alias, w, area), format('case when %s is not null then %s * %s end', s.alias, w, area), f)
+        else format('%s(%s)%s', v->>'agg', s.alias, f)
     end, e.i
     from jsonb_array_elements(spec->'values') with ordinality e(v, i)
-    join gridtiles._sources(spec) s on s.col = v->>'from'
-    left join lateral (select coalesce((select alias from gridtiles._sources(spec) where col = v->>'weight'), '1')) x(w) on true
+    join gridtiles._sources(spec) s on s.col = v->>'from',
+    lateral (select coalesce((select alias from gridtiles._sources(spec) where col = v->>'weight'), '1'),
+                    case when cond is not null then format(' filter (where %s)', cond) else '' end) x(w, f)
     where v->>'agg' <> 'count'
 $$;
 
@@ -198,7 +176,7 @@ $$;
 -- sums treat a side without data as 0; means, minima and maxima exist only where both sides have
 -- data.
 create or replace function gridtiles._values_sql(spec jsonb, share text, area text, diff boolean) returns text
-language sql stable parallel safe as $$
+language sql immutable parallel safe as $$
     select case when not diff then 'count(*) as n' || coalesce(
         (select string_agg(format(', %s as %I', expr, name), '' order by i) from gridtiles._value_exprs(spec, share, area)), '')
     else 'count(*) filter (where _in_b) - count(*) filter (where _in_a) as n' || coalesce(
@@ -211,13 +189,13 @@ $$;
 
 -- One row per square of the region with data: _x, _y, n and one column per non-count value.
 -- Points: each point counts in the square holding it. Polygons: each polygon is split over the
--- squares it overlaps by covered area (in EPSG:3857): sums get
--- value x covered fraction, means are weighted by covered area, min/max apply to every touched
--- square, and n counts the polygons touching a square; a zero-area touch does not count. A
--- polygon is clipped to the region once (unless it lies inside), then intersected per square;
--- its share divides by the area of the whole polygon. `offset 0` keeps the planner from inlining
--- a subquery's expressions into every reference, which would repair, project and clip a polygon
--- again for every square.
+-- squares it overlaps by covered area (in EPSG:3857): sums get value x covered fraction, means
+-- are weighted by covered area, min/max apply to every touched square, and n counts the polygons
+-- touching a square; a zero-area touch does not count. A polygon is clipped to the region once
+-- (unless it lies inside), then to each square; its share divides by the area of the whole
+-- polygon. `offset 0` keeps the planner from inlining a subquery's expressions into every
+-- reference, which would repair, project and clip a polygon again for every use. Levels up to
+-- the layer's cache_zoom read the cache instead, unless a parameter filters the source.
 create or replace function gridtiles._aggregate_sql(l gridtiles.layers, c int, z int, x int, y int, params jsonb)
 returns text
 language plpgsql stable parallel safe as $$
@@ -225,22 +203,27 @@ declare
     t record := gridtiles._time_filter(l, params);
     reg record := gridtiles._region(l, c, z, x, y);
     src text := gridtiles._source_sql(l, reg.filter, t.filter, t.side_b, t.side_a);
-    diff boolean := t.side_b is not null;
+    diff boolean := t.side_a is not null;
     sq record;
     r int := least(z, c);
     envelope text := format('ST_TileEnvelope(%s, %s, %s)', r, x >> (z - r), y >> (z - r));
 begin
+    if c <= l.cache_zoom and t.filter = 'true' then
+        return format('select _x, _y, n%s from gridtiles.%I where _z = %s and _x between %s and %s and _y between %s and %s',
+            (select coalesce(string_agg(format(', %I', name), '' order by i), '') from gridtiles._value_exprs(l.spec, '1', '1')),
+            'cache_' || l.name, c, reg.x0, reg.x1, reg.y0, reg.y1);
+    end if;
     if l.kind = 'polygon' then
         return format(
             'select _x, _y, %s from (
                 select p.*, _x, _y, _a, _a / p._total as _share
-                from (select *, case when _g @ %2$s then _g else ST_Intersection(_g, %2$s) end as _r
+                from (select *, case when _g @ %2$s then _g else ST_ClipByBox2D(_g, %2$s) end as _r
                       from (select *, ST_Area(_g) as _total from (%3$s offset 0) s offset 0) s
                       where _total > 0 offset 0) p,
                     gridtiles._bbox_tile_range(p._r, %4$s) b,
                     generate_series(greatest(b.x0, %5$s), least(b.x1, %6$s)) _x,
                     generate_series(greatest(b.y0, %7$s), least(b.y1, %8$s)) _y,
-                    lateral (select ST_Area(ST_Intersection(p._r, ST_TileEnvelope(%4$s, _x, _y))) as _a) a
+                    lateral (select ST_Area(ST_ClipByBox2D(p._r, ST_TileEnvelope(%4$s, _x, _y))) as _a offset 0) a
              ) h where _a > 0 group by _x, _y',
             gridtiles._values_sql(l.spec, '_share', '_a', diff), envelope, src, c, reg.x0, reg.x1, reg.y0, reg.y1);
     end if;
@@ -322,20 +305,28 @@ begin
         tmax, gridtiles._aggregate_sql(l, tmax, 0, 0, 0, params), tmin);
 end $$;
 
--- gridtiles.stats from gridtiles.stats_cache if computed less than `max_age` ago (NULL: any
--- cached result), otherwise computed and cached; `computed_at` tells when.
-create or replace function gridtiles.cached_stats(name text, params jsonb default '{}', max_age interval default null)
-returns jsonb
+-- Cache the squares of levels min_zoom .. max_zoom, without parameters, in gridtiles.cache_<name>;
+-- tiles at those levels then read the cache, which lags the source until the next refresh. A NULL
+-- max_zoom drops the cache. Returns the number of cached squares.
+create or replace function gridtiles.refresh_cache(name text, max_zoom int) returns bigint
 language plpgsql as $$
 declare
-    cached gridtiles.stats_cache;
+    l gridtiles.layers;
+    tbl text := 'cache_' || name;
+    squares bigint := 0;
 begin
-    select * into cached from gridtiles.stats_cache c where c.layer = cached_stats.name and c.params = cached_stats.params;
-    if not found or (max_age is not null and cached.computed_at <= clock_timestamp() - max_age) then
-        insert into gridtiles.stats_cache as c (layer, params, stats, computed_at)
-        values (name, params, gridtiles.stats(name, params), clock_timestamp())
-        on conflict on constraint stats_cache_pkey do update set stats = excluded.stats, computed_at = excluded.computed_at
-        returning * into cached;
+    select * into strict l from gridtiles.layers where layers.name = refresh_cache.name for update;
+    execute format('drop table if exists gridtiles.%I', tbl);
+    l.cache_zoom := null;  -- build from the source, not from the old cache
+    if max_zoom is not null then
+        execute format('create table gridtiles.%I as %s', tbl, (
+            select string_agg(format('select %s::smallint as _z, * from (%s) a', c, gridtiles._aggregate_sql(l, c, 0, 0, 0, '{}')),
+                ' union all ')
+            from generate_series(l.zmin, least(max_zoom, l.zb)) c));
+        get diagnostics squares = row_count;
+        execute format('create index on gridtiles.%I (_z, _x, _y)', tbl);
     end if;
-    return cached.stats || jsonb_build_object('computed_at', cached.computed_at);
+    update gridtiles.layers set (cache_zoom, cached_at) = (select least(max_zoom, zb), clock_timestamp() where max_zoom is not null)
+    where layers.name = l.name;
+    return squares;
 end $$;

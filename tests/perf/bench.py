@@ -3,6 +3,7 @@
 Generates (once, in the database `gridtiles_live_bench`) clustered points and polygons around 300
 random centres, then times `gridtiles.mvt` on tiles holding data at every published zoom.
 Each tile is requested twice: `first` includes reading pages from disk, `p50`/`p95` are repeats.
+Each layer runs `live`, then `cached` with the levels up to z8 cached (`gridtiles.refresh_cache`).
 """
 
 import argparse
@@ -10,7 +11,6 @@ import statistics
 import time
 
 import psycopg
-from psycopg.types.json import Jsonb
 
 from gridtiles.db import create_layer, install
 from gridtiles.spec import LayerSpec
@@ -86,47 +86,29 @@ def sample_tiles(conn: psycopg.Connection, table: str, z: int, k: int) -> list[t
     return [tuple(conn.execute("select * from gridtiles.qk_to_xy(%s, %s)", (z, qk)).fetchone()) for (qk,) in rows]
 
 
-VARIANTS = {
-    "default": {},
-    "numeric": {"gridtiles.sum_mode": "numeric"},
-    "plain": {"gridtiles.sum_mode": "plain"},
-    "serial": {"max_parallel_workers_per_gather": "0"},
-    "jit": {"jit": "on"},  # runs the tile query directly, since gridtiles.mvt turns JIT off
-}
+CACHE_ZOOM = 8
 
 
-def tile(conn: psycopg.Connection, layer: str, z: int, x: int, y: int, direct: bool) -> bytes:
-    if direct:
-        (query,) = conn.execute("select gridtiles._mvt_query(%s, %s, %s, %s)", (layer, z, x, y)).fetchone()
-        (data,) = conn.execute(query).fetchone()
-    else:
-        (data,) = conn.execute("select gridtiles.mvt(%s, %s, %s, %s, %s)", (layer, z, x, y, Jsonb({}))).fetchone()
-    return bytes(data or b"")
-
-
-def run(conn: psycopg.Connection, layer: str, table: str, variant: str, k: int) -> list[str]:
-    settings = VARIANTS[variant]
-    for key, value in settings.items():
-        conn.execute("select set_config(%s, %s, false)", (key, value))
-    lines = []
+def run(conn: psycopg.Connection, layer: str, table: str, cached: bool, k: int) -> None:
+    start = time.perf_counter()
+    (squares,) = conn.execute("select gridtiles.refresh_cache(%s, %s)", (layer, CACHE_ZOOM if cached else None)).fetchone()
+    if cached:
+        print(f"cached {squares:,} squares up to z{CACHE_ZOOM} in {time.perf_counter() - start:.0f} s", flush=True)
     for z in range(13):
         firsts, repeats, sizes = [], [], []
         for x, y in sample_tiles(conn, table, z, k):
             for attempt in range(2):
                 start = time.perf_counter()
-                data = tile(conn, layer, z, x, y, direct=variant == "jit")
+                (data,) = conn.execute("select gridtiles.mvt(%s, %s, %s, %s)", (layer, z, x, y)).fetchone()
                 (firsts if attempt == 0 else repeats).append(time.perf_counter() - start)
             sizes.append(len(data))
         p95 = statistics.quantiles(repeats, n=20)[-1] if len(repeats) > 1 else repeats[0]
-        lines.append(
-            f"| {layer} | {variant} | {z} | {len(repeats)}"
+        print(
+            f"| {layer} | {'cached' if cached else 'live'} | {z} | {len(repeats)}"
             f" | {max(firsts) * 1000:.0f} | {statistics.median(repeats) * 1000:.0f} | {p95 * 1000:.0f}"
-            f" | {statistics.mean(sizes) / 1024:.0f} |"
+            f" | {statistics.mean(sizes) / 1024:.0f} |",
+            flush=True,
         )
-        print(lines[-1], flush=True)
-    for key in settings:
-        conn.execute(f"reset {key}")
-    return lines
 
 
 def main() -> None:
@@ -135,7 +117,6 @@ def main() -> None:
     parser.add_argument("--polygons", type=int, default=100_000)
     parser.add_argument("--tiles", type=int, default=20, help="tiles per zoom")
     parser.add_argument("--layers", default="points,polygons")
-    parser.add_argument("--variants", default="default", help="comma-separated: default, numeric, plain, serial, jit")
     args = parser.parse_args()
 
     with psycopg.connect(ADMIN_DSN, autocommit=True) as admin:
@@ -143,14 +124,15 @@ def main() -> None:
             admin.execute(f"create database {DB}")
     url = psycopg.conninfo.make_conninfo(ADMIN_DSN, dbname=DB)
     with psycopg.connect(url, autocommit=True) as conn:
+        conn.execute("drop schema if exists gridtiles cascade")  # the generated data lives in public
         install(conn)
         ensure_data(conn, args.points, args.polygons)
         ensure_layers(conn)
         print("| layer | variant | z | tiles | first ms | p50 ms | p95 ms | KiB |")
         print("| --- | --- | --- | --- | --- | --- | --- | --- |")
         for layer in args.layers.split(","):
-            for variant in args.variants.split(","):
-                run(conn, layer, f"bench_{layer}", variant, args.tiles)
+            for cached in (False, True):
+                run(conn, layer, f"bench_{layer}", cached, args.tiles)
 
 
 if __name__ == "__main__":

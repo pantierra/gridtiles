@@ -1,17 +1,13 @@
-import random
-import statistics
-import time
 from pathlib import Path
 
 import mercantile
 import psycopg
 import pytest
-from psycopg.types.json import Jsonb
 
 from gridtiles import quadkey
 
 from ..conftest import FIXTURES
-from ..fixtures.make_fixtures import dense_block, point_wkb, random_points, write_geoparquet
+from ..fixtures.make_fixtures import dense_block
 from .helpers import SPEC, bbox, create, features, source, tile
 
 BLOCK = mercantile.tile(13.405, 52.52, 12)
@@ -152,37 +148,38 @@ def test_malformed_parameters(block: psycopg.Connection) -> None:
     assert bytes(data) == tile(block, 12, BLOCK.x, BLOCK.y)
 
 
-@pytest.mark.parametrize("mode", ["numeric", "plain"])
-def test_sum_modes_agree(db: psycopg.Connection, mode: str) -> None:
+def test_cache(db: psycopg.Connection) -> None:
     source(db, FIXTURES / "points_10k.parquet")
     create(db, SPEC)
-    t = mercantile.tile(13.4, 52.5, 8)
-    ordered = features(tile(db, 8, t.x, t.y))
-    db.execute("select set_config('gridtiles.sum_mode', %s, true)", (mode,))
-    other = features(tile(db, 8, t.x, t.y))
-    assert [f["properties"]["population"] for f in other] == pytest.approx(
-        [f["properties"]["population"] for f in ordered], rel=1e-12
+    tiles = [(z, *mercantile.tile(13.4, 52.5, z)[:2]) for z in range(9)]
+    live = [tile(db, *t) for t in tiles]
+    assert db.execute("select gridtiles.refresh_cache('pop', 8)").fetchone()[0] > 0
+    assert [tile(db, *t) for t in tiles] == live
+
+    # Tiles at cached levels (c = z + 4 <= 8) lag the source until the next refresh.
+    db.execute("delete from pop_points where pop > 50")
+    assert [tile(db, *t) == old for t, old in zip(tiles, live)] == [True] * 5 + [False] * 4
+    db.execute("select gridtiles.refresh_cache('pop', 8)")
+    assert tile(db, *tiles[0]) != live[0]
+
+    db.execute("select gridtiles.refresh_cache('pop', null)")
+    assert db.execute("select to_regclass('gridtiles.cache_pop'), cache_zoom from gridtiles.layers").fetchone() == (
+        None,
+        None,
     )
 
 
-@pytest.mark.perf
-def test_perf_tiles(db: psycopg.Connection, tmp_path: Path) -> None:
-    columns, points = random_points(1_000_000, seed=7)
-    path = tmp_path / "points_1m.parquet"
-    write_geoparquet(path, columns, [point_wkb(*p) for p in points if p is not None])
-    source(db, path)
-    create(db, SPEC)
-    rng = random.Random(5)
-    timings = []
-    for _ in range(500):
-        z = rng.randint(10, 12)
-        t = mercantile.tile(rng.uniform(13.08, 13.76), rng.uniform(52.33, 52.68), z)
-        start = time.perf_counter()
-        db.execute("select gridtiles.tile_pop(%s, %s, %s, %s)", (z, t.x, t.y, Jsonb({})))
-        timings.append(time.perf_counter() - start)
-    p95 = statistics.quantiles(timings, n=20)[-1]
-    print(f"p95 {p95 * 1000:.1f} ms over 500 tiles")
-    assert p95 < 0.5
+def test_cache_is_bypassed_with_parameters(db: psycopg.Connection) -> None:
+    source(db, FIXTURES / "points_small.csv")
+    db.execute("alter table pop_points add column day date default '2024-01-01'")
+    create(db, {**SPEC, "source": {"table": "pop_points", "time": "day"}})
+    db.execute("select gridtiles.refresh_cache('pop', 16)")
+    db.execute("delete from pop_points")
+    t = mercantile.tile(13.405, 52.52, 12)
+    assert tile(db, 12, t.x, t.y) != b""
+    assert tile(db, 12, t.x, t.y, params={"at": "2024-01-01"}) == b""
+    db.execute("select gridtiles.drop_layer('pop')")
+    assert db.execute("select to_regclass('gridtiles.cache_pop')").fetchone() == (None,)
 
 
 def test_polygon_counts_once_per_square(db: psycopg.Connection) -> None:

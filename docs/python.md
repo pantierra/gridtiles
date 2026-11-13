@@ -18,7 +18,7 @@ quadkey.from_lonlat(13.405, 52.52, 16)  # cell containing the point
 
 ## `gridtiles.spec`
 
-`LayerSpec` and `ValueSpec` validate a layer spec: name `^[a-z][a-z0-9_]{0,47}$`, `0 ≤ min_zoom ≤ base_zoom ≤ 30`, `detail` in 0–8 (default 4), unique value names, `agg` one of `count`, `sum`, `min`, `max`, `mean`, and `weight` only with `mean`.
+`LayerSpec` validates a layer spec: name `^[a-z][a-z0-9_]{0,47}$`, a `source` (`table`, `geometry` default `geom`, optional `time`), `0 ≤ min_zoom ≤ base_zoom ≤ 30`, `detail` in 0–8 (default 4), unique value names, `agg` one of `count`, `sum`, `min`, `max`, `mean`, and `weight` only with `mean`.
 
 ```python
 from gridtiles.spec import LayerSpec
@@ -26,42 +26,41 @@ from gridtiles.spec import LayerSpec
 spec = LayerSpec.model_validate(
     {
         "name": "pop",
+        "source": {"table": "pop_points"},
         "base_zoom": 16,
         "min_zoom": 2,
         "values": [{"name": "population", "from": "pop", "agg": "sum", "unit": "people"}],
     }
 )
-spec.detail  # 4
-spec.model_dump_json()  # JSON accepted by gridtiles.create_layer
 ```
 
-## `gridtiles.ingest`
+## `gridtiles.db`
 
-`load(conn, layer, path, ...)` loads a file into an existing layer, detecting what it holds: points, polygons (or multipolygons) or a raster (`.tif`, `.tiff`, `.vrt`, `.jp2`, `.nc`). It rebuilds the coarser levels and stats unless `rollup=False`, and returns a `LoadReport` (`records_read`, `records_loaded`, `skipped_null_geometry`, `cells_written`). Repeated loads add up.
+| Function | Does |
+| --- | --- |
+| `install(conn)` | Install the SQL; returns the schema version |
+| `create_layer(conn, spec)`, `drop_layer(conn, name)` | Register or remove a layer (see [sql.md](sql.md#layers)) |
+| `layers(conn, names=None, *, stats=False, params=None)` | Registered layers; with `stats`, also their stats and bounds, time values and the parameters the stats describe (default: the latest time) |
 
-| Function | Reads | Values per base cell |
-| --- | --- | --- |
-| `load_points(conn, layer, path, *, lon=None, lat=None, crs="EPSG:4326", rollup=True)` | CSV (`lon` / `lat` columns, default: common names), GeoParquet (pyarrow), anything GDAL reads | each point adds its values |
-| `load_polygons(conn, layer, path, *, crs="EPSG:4326", rollup=True, max_cells_per_feature=1_000_000)` | anything GDAL reads, GeoParquet | sums get value × covered fraction; means are weighted by covered area; min/max apply to every touched cell; `n` counts touching polygons |
-| `load_raster(conn, layer, path, *, band=1, rollup=True)` | anything rasterio reads | each valid pixel is a point at its centre with the source column `value` |
+## `gridtiles.importer`
 
-`crs` applies when the source declares none. Null and empty geometries count as `skipped_null_geometry`. A geometry other than points and polygons, or a mix of both, raises `UnsupportedGeometry`; a polygon spanning more than `max_cells_per_feature` base cells raises `CellLimitExceeded` (`None`: no limit); pixels larger than half a base cell raise `ValueError` with a suggested base zoom. `load_raster` holds the whole band in memory, plus Python objects for every valid pixel (several GB for 100 million pixels), so split very large rasters into tiles first.
-
-The load and the rollup run in one transaction, so a failing rollup rolls back the load. Each rollup rebuilds every coarser level, so when loading many files pass `rollup=False` and call the SQL function once at the end: `conn.execute("select gridtiles.rollup(%s)", (layer,))`.
+`import_file(conn, path, table, *, replace=False)` creates a plain table from a point or polygon file: a `geom` column (`Point` or `MultiPolygon`, in the file's SRID; EPSG:4326 if it declares none), the file's boolean, integer, float, text, date and timestamp columns, and the GiST index tiles need. It reads CSV (`lon` / `lat` columns, by common names), GeoParquet and anything GDAL reads. An existing table raises `ValueError` unless `replace` drops it first. Null and empty geometries are skipped; anything but points or polygons, or a mix of both, raises `UnsupportedGeometry`. It returns an `ImportReport` (`records_read`, `records_imported`, `kind`, `columns`).
 
 ```python
 import psycopg
 
-from gridtiles.ingest import load
+from gridtiles import db
+from gridtiles.importer import import_file
+from gridtiles.spec import LayerSpec
 
 with psycopg.connect("postgresql://postgres:postgres@localhost:5439/postgres") as conn:
-    print(load(conn, "pop", "tests/fixtures/points_small.csv"))
-    # LoadReport(records_read=8, records_loaded=8, skipped_null_geometry=0, cells_written=3)
+    import_file(conn, "tests/fixtures/points_small.csv", "pop_points")
+    db.create_layer(conn, LayerSpec.model_validate_json(open("tests/fixtures/spec_pop.json").read()))
 ```
 
 ## `gridtiles.export`
 
-`export_pmtiles(conn, layer, out_path, *, workers=4)` writes the layer's tiles to a PMTiles archive, fetching them over `workers` parallel connections, and writes the viewer next to it. `manifest(layer)` is the metadata stored under the archive's `gridtiles` key.
+`export_pmtiles(conn, layer, out_path, *, params=None, workers=4)` writes the layer's tiles of `params` (default: the latest time, if any) to a PMTiles archive, fetching them over `workers` parallel connections, and writes the viewer next to it; exports into one folder share the viewer. `manifest(layer)` is the metadata stored under the archive's `gridtiles` key.
 
 ```python
 import psycopg

@@ -117,12 +117,10 @@ def assert_matches_oracle(db: psycopg.Connection, spec: dict, kind: str = "point
     return len(tiles)
 
 
-@pytest.mark.parametrize("mode", ["ordered", "numeric", "plain"])
-def test_points_10k(db: psycopg.Connection, mode: str) -> None:
+def test_points_10k(db: psycopg.Connection) -> None:
     source(db, FIXTURES / "points_10k.parquet")
     create(db, SPEC_MINMAX, "pop_points")
     oracle(db, SPEC_MINMAX, "pop_points")
-    db.execute("select set_config('gridtiles.sum_mode', %s, true)", (mode,))
     assert assert_matches_oracle(db, SPEC_MINMAX) > 100
 
 

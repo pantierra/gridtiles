@@ -1,4 +1,4 @@
-.PHONY: up down db-reset test e2e check
+.PHONY: up down db-reset test e2e check bench
 
 TEST_DB := gridtiles_test
 PSQL := docker compose exec -T db psql -v ON_ERROR_STOP=1 -U postgres
@@ -24,3 +24,6 @@ check:
 	uv run ruff format --check
 	uv run mypy
 	uv run pytest -m ""
+
+bench:
+	uv run python -m tests.perf.bench

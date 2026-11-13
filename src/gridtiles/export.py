@@ -5,7 +5,6 @@ import math
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from datetime import timedelta
 from itertools import batched
 from os import PathLike
 from pathlib import Path
@@ -48,7 +47,7 @@ def export_pmtiles(
     `params` (by default the latest time of a layer with a time column). Exports of the same data
     are identical.
     """
-    (fresh,) = db.layers(conn, [layer], stats=True, max_age=timedelta(0), params=params)
+    (fresh,) = db.layers(conn, [layer], stats=True, params=params)
     info = replace(fresh, times=None)  # one point in time; the static viewer has no time slider
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
